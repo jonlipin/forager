@@ -46,10 +46,19 @@ C_Minimap = {
   SetTracking = function(i, on)
     local fromKey = T.inKey
     if T.blockAll or (T.blockTimer and not fromKey) then fire("ADDON_ACTION_BLOCKED", "Forager", "UNKNOWN()") return end
-    for _, t in ipairs(T.tracking) do if t.type == "spell" then t.active = false end end
-    T.tracking[i].active = on
-    T.switches = (T.switches or 0) + 1
-    fire("MINIMAP_UPDATE_TRACKING")
+    local function land()
+      for _, t in ipairs(T.tracking) do if t.type == "spell" then t.active = false end end
+      T.tracking[i].active = on
+      T.switches = (T.switches or 0) + 1
+      T.landedAt = T.now
+    end
+    if T.lag then
+      fire("MINIMAP_UPDATE_TRACKING")
+      C_Timer.After(T.lag, land)
+    else
+      land()
+      fire("MINIMAP_UPDATE_TRACKING")
+    end
   end,
 }
 C_Timer = {
@@ -245,6 +254,19 @@ run('a swipe ticks down on the next tracker', `
   check(mineralsCd.shown == false, "no swipe on the tracker that is on")
   SlashCmdList.FORAGER("off")
   for _, f in ipairs(T.frames) do if rawget(f, "cdStart") and rawget(f, "shown") then check(false, "no swipe while paused") end end
+`);
+run('the swipe starts full when a slow switch lands', `
+  T.lag = 0.6
+  T.advance(7.5) check(T.active() == "Find Herbs", "herbs landed")
+  local landed = T.landedAt
+  local swipe
+  for _, f in ipairs(T.frames) do
+    if rawget(f, "cdStart") and rawget(f, "shown") then swipe = f end
+  end
+  check(swipe ~= nil, "swipe on minerals")
+  check(swipe.cdStart >= landed, "starts when the switch landed (" .. landed .. "), not when asked (" .. swipe.cdStart .. ")")
+  check(swipe.cdStart - landed <= 0.25, "within a tick of landing")
+  T.advance(6.5) check(T.active() == "Find Minerals", "next one lands too")
 `);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

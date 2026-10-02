@@ -621,7 +621,9 @@ UpdateBar = function()
     if bar.count ~= #entries then LayoutBar(#entries) end
 
     local left = math.ceil(db.delay - (GetTime() - lastSwitch))
-    local nextEntry = (db.enabled and left > 0 and not Blocker(s)) and NextEntry(s)
+    -- Nothing counts down while a switch is still landing.
+    local landing = attempt and not attempt.done and s.active ~= attempt.target
+    local nextEntry = (db.enabled and left > 0 and not landing and not Blocker(s)) and NextEntry(s)
     for i = 1, #entries do
         local b = trackButtons[i]
         local on = s.active == b.key
@@ -1167,6 +1169,10 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         UpdateBar()
         SetUpKeys()
         C_Timer.NewTicker(0.25, function()
+            -- The tracking event can come before the new tracker reads as on,
+            -- so the change is also looked for here; the countdown starts
+            -- when the switch has really happened.
+            OnTrackingChanged()
             if db.method == nil or db.method == "timer" then TrySwitch("timer") end
             UpdateBar()
         end)
