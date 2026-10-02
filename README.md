@@ -47,7 +47,7 @@ Forager uses the same call as the game's own tracking menu. If the game ever sto
 
 ## Install
 
-Download it from [CurseForge](https://www.curseforge.com/wow/addons/forager) with your addon manager, or copy the files in this repository into a folder named `Forager` inside `_classic_beta_/Interface/AddOns`.
+Download it from [CurseForge](https://www.curseforge.com/wow/addons/forager-auto-tracking-switcher-for-find-herbs-find) with your addon manager, or copy the files in this repository into a folder named `Forager` inside `_classic_beta_/Interface/AddOns`.
 
 ## Development
 
