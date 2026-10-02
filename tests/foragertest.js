@@ -12,7 +12,17 @@ T.tracking = {
   { name = "Find Minerals", spellID = 2580, type = "spell", active = false, texture = 2 },
   { name = "Track Beasts", spellID = 1494, type = "spell", active = false, texture = 3 },
   { name = "Flight Master", type = "townfolk", active = true, texture = 4 },
+  { name = "Find Fish", spellID = 43308, type = "spell", active = false, texture = 5 },
+  { name = "Track Humanoids", spellID = 5225, type = "spell", active = false, texture = 6 },
 }
+T.cvars = { Sound_EnableSFX = "1" }
+T.sfxLog = {}
+function GetCVar(k) return T.cvars[k] end
+function SetCVar(k, v) T.cvars[k] = v if k == "Sound_EnableSFX" then T.sfxLog[#T.sfxLog + 1] = { T.now, v } end end
+function GetInventoryItemID(_, slot) if slot == 16 then return T.mainHand end end
+C_Item = { GetItemInfoInstant = function(id) if id == 6256 then return id, "Weapon", "Fishing Poles", "INVTYPE_2HWEAPON", 0, 2, 20 end return id, "Weapon", "Swords", "INVTYPE_WEAPON", 0, 2, 7 end }
+function GetShapeshiftFormID() return T.form end
+function UnitClass() return T.className or "Mage", T.class or "MAGE" end
 function GetTime() return T.now end
 function IsResting() return T.resting end
 function IsInInstance() return T.instance ~= nil, T.instance or "none" end
@@ -50,6 +60,7 @@ C_Minimap = {
   SetTracking = function(i, on)
     local fromKey = T.inKey
     if T.blockAll or (T.blockTimer and not fromKey) then fire("ADDON_ACTION_BLOCKED", "Forager", "UNKNOWN()") return end
+    T.sfxAtCast = T.cvars.Sound_EnableSFX
     local function land()
       for _, t in ipairs(T.tracking) do if t.type == "spell" then t.active = false end end
       T.tracking[i].active = on
@@ -298,8 +309,8 @@ run('trackers rotate in the order you set', `
   T.advance(6.5) check(T.active() == "Find Herbs", "back to herbs")
   SlashCmdList.FORAGER("move herbs up")
   check(ForagerDB.order[1] == 2383, "the top one can't move up")
-  SlashCmdList.FORAGER("move minerals down")
-  check(ForagerDB.order[3] == 2580, "the bottom one can't move down")
+  SlashCmdList.FORAGER("move humanoids down")
+  check(ForagerDB.order[5] == 5225, "the bottom one can't move down")
 `);
 run('an order saved on another character is kept', `
   ForagerDB.order = { 9999, 2580, 2383 }
@@ -336,6 +347,37 @@ run('nothing restored when the option is off or tracking was off', DIE + `
   T.tracking[1].active = true T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
   T.tracking[1].active = false T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
   T.die() T.dead = false T.advance(2) check(T.active() == nil, "you had switched it off")
+`);
+run('quiet switches mute sound effects only around the switch', `
+  T.lag = 0.6
+  T.advance(7) check(T.active() == "Find Herbs", "herbs on")
+  check(T.sfxAtCast == "0", "muted when the switch is cast")
+  T.advance(1) check(T.cvars.Sound_EnableSFX == "1", "sound back after it lands")
+  check(#T.sfxLog == 2, "muted once and unmuted once, got " .. #T.sfxLog)
+  check(T.sfxLog[2][1] - T.sfxLog[1][1] <= 1.5, "muted for at most a moment")
+  ForagerDB.quiet = false T.advance(7) check(T.sfxAtCast == "1", "not muted with the option off")
+`);
+run('a switch waits while the loot window is open', `
+  T.fire("LOOT_OPENED") T.advance(10) check(T.active() == nil, "no switch while looting")
+  T.fire("LOOT_CLOSED") T.advance(0.5) check(T.active() == "Find Herbs", "switches when it closes")
+`);
+run('a fishing pole swaps in Find Fish and hands back to the rotation', `
+  T.advance(6.5) check(T.active() == "Find Herbs", "herbs on")
+  T.mainHand = 6256 T.advance(2) check(T.active() == "Find Fish", "Find Fish with a pole, got " .. tostring(T.active()))
+  T.advance(20) check(T.active() == "Find Fish", "the rotation waits while fishing")
+  T.mainHand = 1234 T.advance(2) check(T.active() == "Find Minerals" or T.active() == "Find Herbs", "rotation back at once, got " .. tostring(T.active()))
+  T.advance(14) check(T.switches >= 4, "rotation keeps going, " .. tostring(T.switches))
+`);
+run('Cat Form tracks humanoids; paused rotation gets the old tracker back', `
+  T.advance(6.5) SlashCmdList.FORAGER("off")
+  T.form = 1 T.advance(2) check(T.active() == "Track Humanoids", "humanoids in Cat Form")
+  T.form = nil T.advance(2) check(T.active() == "Find Herbs", "herbs back after Cat Form, got " .. tostring(T.active()))
+  ForagerDB.swapCatForm = false T.form = 1 T.advance(5) check(T.active() == "Find Herbs", "option off")
+`);
+run('hunters track humanoids in battlegrounds', `
+  T.class = "HUNTER" T.instance = "pvp"
+  T.advance(2) check(T.active() == "Track Humanoids", "humanoids in a battleground, got " .. tostring(T.active()))
+  T.class = "MAGE" T.instance = nil
 `);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

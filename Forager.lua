@@ -29,6 +29,12 @@ local DEFAULTS = {
     pauseResting = true,   -- cities and inns
     pauseInstances = true, -- dungeons, raids, battlegrounds, arenas
     restoreAfterDeath = true, -- turn the last tracker back on after you die
+    quiet = true,          -- mute sound effects for a moment around each switch
+    pauseLooting = true,   -- hold a due switch while the loot window is open
+    minimapShowsTracker = true, -- the minimap button shows the tracker that is on
+    swapFishing = true,    -- fishing pole equipped: Find Fish
+    swapCatForm = true,    -- Cat Form: Track Humanoids
+    swapHunterPvP = true,  -- hunter in a battleground or arena: Track Humanoids
     -- method: nil = not learned yet, "timer", "key", "none"
     -- rotation: { [spellID] = true } for the trackers that take part
     -- lastTracked: { [player GUID] = key or false } for restoring after death
@@ -42,6 +48,11 @@ local lastActive       -- key of the tracking spell last seen on
 local attempt          -- the switch waiting to be confirmed
 local silentFails = 0
 local failing = {}     -- [key] = GetTime() until which a tracker that failed to cast is skipped
+local looting = false  -- the loot window is open
+local override         -- { key, name, why, before } while a situation calls for a tracker
+local ownedKey         -- a situational tracker Forager put on, which the rotation may replace
+local mutedAt          -- GetTime() when Forager muted sound effects
+local Mute, Unmute     -- defined with Cast
 local RefreshOptions, UpdateMinimapButton, SetUpKeys, UpdateBar, Toggle -- defined below
 
 ---------------------------------------------------------------------------
@@ -175,6 +186,7 @@ end
 
 -- Returns nil when a switch may happen now, else the reason it may not.
 local function Blocker(s)
+    if override then return "using " .. override.name .. " (" .. override.why .. ")" end
     if not db.enabled then return "paused" end
     if db.method == "none" then return "the game refuses the switch" end
     if InCombatLockdown() or UnitAffectingCombat("player") then return "in combat" end
@@ -187,7 +199,7 @@ local function Blocker(s)
     end
     if #s.list < 2 then return "this character knows fewer than two tracking spells" end
     if #s.rotation < 2 then return "tick at least two trackers to rotate" end
-    if s.other then return s.other .. " is on, and it isn't in the rotation" end
+    if s.other and s.active ~= ownedKey then return s.other .. " is on, and it isn't in the rotation" end
     local nextEntry = NextEntry(s)
     if not nextEntry then return "the other trackers can't be cast right now" end
     -- Key press mode only switches while you press keys anyway.
@@ -199,6 +211,7 @@ end
 -- hid the countdown for 1.5 s after every switch.
 local function Momentary(s)
     if Busy() then return "casting" end
+    if db.pauseLooting and looting then return "looting" end
     local nextEntry = NextEntry(s)
     if nextEntry and OnCooldown(nextEntry.key) then return "global cooldown" end
 end
@@ -212,6 +225,7 @@ local function Verify()
     if not a or a.done then return end
     a.done = true
     local s = Scan()
+    if mutedAt and s.active ~= a.target then Unmute() end
     if s.active == a.target then
         silentFails = 0
         failing[a.target] = nil
@@ -238,7 +252,31 @@ local function Verify()
     if RefreshOptions then RefreshOptions() end
 end
 
+-- Each switch is a spell cast with its own sound. Sound effects are muted
+-- from the cast until just after it lands (2 s at most). db.unmuteSFX lets a
+-- reload or crash in between put the sound back at the next login.
+Mute = function()
+    if not db.quiet then return end
+    if mutedAt then
+        mutedAt = GetTime()
+        return
+    end
+    local ok, value = pcall(GetCVar, "Sound_EnableSFX")
+    if not ok or value ~= "1" then return end
+    if pcall(SetCVar, "Sound_EnableSFX", "0") then
+        mutedAt = GetTime()
+        db.unmuteSFX = true
+    end
+end
+
+Unmute = function()
+    if not (mutedAt or db.unmuteSFX) then return end
+    pcall(SetCVar, "Sound_EnableSFX", "1")
+    mutedAt, db.unmuteSFX = nil, nil
+end
+
 local function Cast(e, source)
+    Mute()
     attempt = { at = GetTime(), target = e.key, name = e.name, source = source }
     local ok, err = pcall(C_Minimap.SetTracking, e.index, true)
     if not ok then Log("SetTracking error: " .. tostring(err)) end
@@ -291,9 +329,87 @@ local function TryRestore()
     Cast(e, "restore")
 end
 
+-- Trackers a situation calls for. Track Humanoids is a druid spell (Cat
+-- Form) and a hunter spell; Find Fish came with the Weather-Beaten Journal.
+local TRACK_HUMANOIDS = { [5225] = true, [19883] = true }
+local FIND_FISH = { [43308] = true }
+
+local function FindEntry(s, ids, name)
+    for _, e in ipairs(s.list) do
+        if ids[e.key] or e.name == name then return e end
+    end
+end
+
+local function HoldingFishingPole()
+    local id = GetInventoryItemID and GetInventoryItemID("player", 16)
+    if not id or not (C_Item and C_Item.GetItemInfoInstant) then return false end
+    local _, _, _, _, _, classID, subClassID = C_Item.GetItemInfoInstant(id)
+    return classID == 2 and subClassID == 20
+end
+
+local function InCatForm()
+    local ok, form = pcall(GetShapeshiftFormID)
+    return ok and form == 1
+end
+
+local function HunterInBattleground()
+    local _, class = UnitClass("player")
+    if class ~= "HUNTER" then return false end
+    local inside, kind = IsInInstance()
+    return inside and (kind == "pvp" or kind == "arena")
+end
+
+-- The tracker the moment calls for, and why, or nil.
+local function Situation(s)
+    if db.swapFishing and HoldingFishingPole() then
+        local e = FindEntry(s, FIND_FISH, "Find Fish")
+        if e then return e, "fishing pole equipped" end
+    end
+    if db.swapCatForm and InCatForm() then
+        local e = FindEntry(s, TRACK_HUMANOIDS, "Track Humanoids")
+        if e then return e, "Cat Form" end
+    end
+    if db.swapHunterPvP and HunterInBattleground() then
+        local e = FindEntry(s, TRACK_HUMANOIDS, "Track Humanoids")
+        if e then return e, "battleground" end
+    end
+end
+
+-- Puts on the tracker a situation calls for, and when it's over hands back
+-- to the rotation, or to what was on before when the rotation is paused.
+local function UpdateSituation()
+    local s = Scan()
+    local e, why = Situation(s)
+    if e then
+        if not override or override.key ~= e.key then
+            override = { key = e.key, name = e.name, why = why, before = override and override.before or s.active }
+            Log("situation: " .. why .. ", using " .. e.name)
+            if UpdateBar then UpdateBar() end
+        end
+        if s.active == e.key then return end
+        if InCombatLockdown() or UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") or UnitOnTaxi("player") then return end
+        if Busy() or OnCooldown(e.key) or (failing[e.key] or 0) > GetTime() then return end
+        if attempt and not attempt.done then return end
+        Cast(e, "situation")
+        ownedKey = e.key
+    elseif override then
+        local before = override.before
+        Log("situation over (" .. override.why .. ")")
+        override = nil
+        if db.enabled then
+            lastSwitch = 0 -- the rotation picks up at once
+        elseif before and before ~= s.active and s.byKey[before] then
+            Cast(s.byKey[before], "situation")
+        end
+        if UpdateBar then UpdateBar() end
+    end
+end
+
 local function OnTrackingChanged()
     local active = Scan().active
     if active ~= lastActive then
+        if mutedAt and attempt and active == attempt.target then C_Timer.After(0.3, Unmute) end
+        if active ~= ownedKey then ownedKey = nil end
         RememberTracker(active)
         if active then lastSwitch = GetTime() end
         lastActive = active
@@ -740,7 +856,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 590
+local W, CONTENT_H = 680, 670
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -928,11 +1044,15 @@ local function BuildContent()
     OptionCheck(c, "Only switch while moving", "onlyMoving", LEFT, -106)
     OptionCheck(c, "Pause in cities and inns", "pauseResting", LEFT, -132)
     OptionCheck(c, "Pause in dungeons, raids and battlegrounds", "pauseInstances", LEFT, -158)
-    OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", LEFT, -184)
-    OptionCheck(c, "Restore tracking after death", "restoreAfterDeath", LEFT, -210)
+    OptionCheck(c, "Wait while the loot window is open", "pauseLooting", LEFT, -184)
+    OptionCheck(c, "Quiet switches (mutes sound effects briefly)", "quiet", LEFT, -210, function()
+        if not db.quiet then Unmute() end
+    end)
+    OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", LEFT, -236)
+    OptionCheck(c, "Restore tracking after death", "restoreAfterDeath", LEFT, -262)
 
-    Header(c, "Trackers to rotate", LEFT, -248)
-    TrackerList(c, LEFT, -274)
+    Header(c, "Trackers to rotate", LEFT, -300)
+    TrackerList(c, LEFT, -326)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
@@ -950,22 +1070,28 @@ local function BuildContent()
         UpdateMinimapButton()
         if not db.minimap then Print("minimap button hidden. /forager opens the options.") end
     end)
+    OptionCheck(c, "Show the current tracker on it", "minimapShowsTracker", RIGHT, -328, function() UpdateMinimapButton() end)
 
-    Header(c, "Status", RIGHT, -340)
+    Header(c, "Swap for the situation", RIGHT, -366)
+    OptionCheck(c, "Fishing pole equipped: Find Fish", "swapFishing", RIGHT, -392)
+    OptionCheck(c, "Cat Form: Track Humanoids", "swapCatForm", RIGHT, -418)
+    OptionCheck(c, "Hunter in a battleground: Track Humanoids", "swapHunterPvP", RIGHT, -444)
+
+    Header(c, "Status", RIGHT, -482)
     local status = c:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    status:SetPoint("TOPLEFT", RIGHT + 4, -368)
+    status:SetPoint("TOPLEFT", RIGHT + 4, -510)
     status:SetWidth(COL - 20)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)
     optionRefreshers[#optionRefreshers + 1] = function() status:SetText(StatusText()) end
-    PanelButton(c, "Try the timer again", RIGHT, -466, 160, function()
+    PanelButton(c, "Try the timer again", RIGHT, -594, 160, function()
         db.method = nil
         silentFails = 0
         Log("method reset from options")
         RefreshOptions()
     end)
     local hint = c:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("TOPLEFT", RIGHT + 4, -502)
+    hint:SetPoint("TOPLEFT", RIGHT + 4, -628)
     hint:SetWidth(COL - 20)
     hint:SetJustifyH("LEFT")
     hint:SetText("Key bindings for pause / resume, switch now and these options: Options > Keybindings > AddOns > Forager. /forager opens this page.")
@@ -1178,6 +1304,9 @@ UpdateMinimapButton = function()
         end)
         mmButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
     end
+    local s = Scan()
+    local on = s.active and s.byKey[s.active]
+    mmIcon:SetTexture(db.minimapShowsTracker and on and on.texture or ICON)
     mmIcon:SetDesaturated(not db.enabled)
     mmButton:SetShown(db.minimap and true or false)
     PlaceMinimapButton()
@@ -1282,6 +1411,9 @@ events:RegisterEvent("MINIMAP_UPDATE_TRACKING")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
 events:RegisterEvent("UI_ERROR_MESSAGE")
 events:RegisterEvent("PLAYER_DEAD")
+events:RegisterEvent("LOOT_OPENED")
+events:RegisterEvent("LOOT_CLOSED")
+events:RegisterEvent("PLAYER_LOGOUT")
 events:RegisterEvent("ADDON_ACTION_BLOCKED")
 events:RegisterEvent("ADDON_ACTION_FORBIDDEN")
 
@@ -1296,6 +1428,8 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         db.rotation = db.rotation or { [HERBS] = true, [MINERALS] = true }
         db.order = db.order or {}
         db.lastTracked = db.lastTracked or {}
+        -- Sound left muted by a reload in the middle of a switch.
+        if db.unmuteSFX then Unmute() end
         db.barPoint = nil -- 1.1.0 kept the position in another form
         ForagerLog = ForagerLog or {}
         ForagerLog.lines = ForagerLog.lines or {}
@@ -1321,6 +1455,8 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             -- when the switch has really happened.
             OnTrackingChanged()
             TryRestore()
+            UpdateSituation()
+            if mutedAt and GetTime() - mutedAt > 2 then Unmute() end
             if db.method == nil or db.method == "timer" then TrySwitch("timer") end
             UpdateBar()
         end)
@@ -1330,6 +1466,12 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         SetUpKeys()
     elseif event == "UI_ERROR_MESSAGE" then
         OnGameError(arg2)
+    elseif event == "LOOT_OPENED" then
+        looting = true
+    elseif event == "LOOT_CLOSED" then
+        looting = false
+    elseif event == "PLAYER_LOGOUT" then
+        Unmute()
     elseif event == "PLAYER_DEAD" then
         deathAt, aliveAt = GetTime(), nil
         Log("died; tracker to restore: " .. tostring(db.lastTracked[UnitGUID("player") or ""]))
