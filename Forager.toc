@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: Forager
-## Notes: Switches between Find Herbs and Find Minerals on a set delay while you are out of combat.
+## Notes: Rotates through your tracking spells (Find Herbs, Find Minerals and any others you pick) on a set delay while you are out of combat.
 ## Author: jonlipin
-## Version: 1.1.0
+## Version: 1.2.0
 ## SavedVariables: ForagerDB, ForagerLog
 ## LoadSavedVariablesFirst: 1
 ## IconTexture: Interface\Icons\INV_Misc_Flower_02

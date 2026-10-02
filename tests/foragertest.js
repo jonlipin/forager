@@ -14,6 +14,13 @@ T.tracking = {
   { name = "Flight Master", type = "townfolk", active = true, texture = 4 },
 }
 function GetTime() return T.now end
+function IsResting() return T.resting end
+function IsInInstance() return T.instance ~= nil, T.instance or "none" end
+function GetUnitSpeed() return T.speed or 7 end
+function T.keyboardSafe()
+  for _, f in ipairs(T.frames) do if f.keyboard and not f.propagate then return false end end
+  return true
+end
 function date() return "12:00:00" end
 function print(m) T.prints[#T.prints + 1] = m end
 function debugstack() return "stack" end
@@ -51,7 +58,8 @@ C_Timer = {
 }
 local Frame = {}
 Frame.__index = function(self, k) return Frame[k] or function() end end
-function Frame:SetScript(n, f) self.scripts[n] = f end
+function Frame:SetScript(n, f) self.scripts[n] = f if f and (n == "OnKeyDown" or n == "OnKeyUp") then self.keyboard = true end end
+function Frame:GetPropagateKeyboardInput() return self.propagate end
 function Frame:RegisterEvent(e) self.events[e] = true end
 function Frame:EnableKeyboard(on) self.keyboard = on end
 function Frame:SetPropagateKeyboardInput(on) if T.combat then error("protected") end self.propagate = on end
@@ -64,6 +72,9 @@ function Frame:SetText(v) self.text = v end
 function Frame:CreateTexture() return setmetatable({ scripts = {}, events = {} }, Frame) end
 function Frame:CreateFontString() return setmetatable({ scripts = {}, events = {} }, Frame) end
 function Frame:GetWidth() return 140 end
+function Frame:GetScale() return self.scale or 1 end
+function Frame:SetScale(v) self.scale = v end
+function Frame:GetCenter() return nil end
 function Frame:GetFrameLevel() return 1 end
 function Frame:GetChecked() return self.checked end
 function Frame:IsVisible() return false end
@@ -95,7 +106,7 @@ function T.active()
 end
 function T.key(k)
   local kf = _G.ForagerKeyListener
-  if not (kf.keyboard and kf.propagate) then return end
+  if not (kf and kf.keyboard and kf.propagate) then return end
   T.inKey = true
   kf.scripts.OnKeyDown(kf, k)
   T.inKey = false
@@ -110,7 +121,9 @@ function run(name, body) {
   const code = STUBS +
     `\nlocal chunk = assert(load(${JSON.stringify(src)}, "@Forager.lua"))\nchunk("Forager", {})\n` +
     `T.fire("ADDON_LOADED", "Forager")\nT.fire("PLAYER_LOGIN")\n` +
-    `local function check(ok, what) if ok then CHECKS_PASS = (CHECKS_PASS or 0) + 1 else error("FAILED: " .. what, 2) end end\n` + body;
+    `local function check(ok, what) if ok then CHECKS_PASS = (CHECKS_PASS or 0) + 1 else error("FAILED: " .. what, 2) end end\n` +
+    `check(T.keyboardSafe(), "keyboard passes through after login")\n` + body +
+    `\ncheck(T.keyboardSafe(), "keyboard passes through at the end")\n`;
   const status = lauxlib.luaL_dostring(L, to_luastring(code));
   if (status !== 0) { fail++; console.log('FAIL ' + name + ': ' + lua.lua_tojsstring(L, -1)); return; }
   lua.lua_getglobal(L, to_luastring('CHECKS_PASS'));
@@ -154,7 +167,7 @@ run('key listener set up only out of combat', `
   T.combat = true T.blockTimer = true
   ForagerDB.method = "key"
   T.fire("PLAYER_REGEN_DISABLED")
-  check(not ForagerKeyListener.keyboard, "not in combat")
+  check(not (ForagerKeyListener and ForagerKeyListener.keyboard), "not in combat")
   T.combat = false T.fire("PLAYER_REGEN_ENABLED")
   check(ForagerKeyListener.keyboard, "after combat")
 `);
@@ -182,6 +195,39 @@ run('tracker icons glow on the active tracker and pause resumes', `
   ForagerPauseButton.scripts.OnClick(ForagerPauseButton, "LeftButton")
   check(ForagerDB.enabled == true, "resumed")
   T.advance(6.5) check(T.active() == "Find Herbs", "switching again")
+`);
+run('rotates through every ticked tracker', `
+  ForagerDB.rotation[1494] = true
+  T.advance(6.5) check(T.active() == "Find Herbs", "1: herbs")
+  T.advance(6.5) check(T.active() == "Find Minerals", "2: minerals")
+  T.advance(6.5) check(T.active() == "Track Beasts", "3: beasts, got " .. tostring(T.active()))
+  T.advance(6.5) check(T.active() == "Find Herbs", "back to herbs")
+`);
+run('an unticked tracker leaves only one and nothing switches', `
+  ForagerDB.rotation[2580] = nil
+  T.advance(20) check(T.active() == nil, "one tracker is no rotation")
+`);
+run('a tracker that fails to cast is skipped', `
+  ForagerDB.rotation[1494] = true
+  local real = C_Minimap.SetTracking
+  C_Minimap.SetTracking = function(i, on)
+    if i == 3 then T.fire("UI_ERROR_MESSAGE", 50, "Must be in Cat Form") return end
+    real(i, on)
+  end
+  T.advance(6.5) T.advance(6.5) check(T.active() == "Find Minerals", "minerals")
+  T.advance(6.5) check(T.active() == "Find Minerals", "beasts failed")
+  check(ForagerDB.method == "timer", "a game error is not a refusal, got " .. tostring(ForagerDB.method))
+  T.advance(6.5) check(T.active() == "Find Herbs", "skipped to herbs, got " .. tostring(T.active()))
+`);
+run('pauses in cities, instances and standing still', `
+  T.resting = true T.advance(20) check(T.active() == nil, "resting")
+  T.resting = false T.instance = "party" T.advance(20) check(T.active() == nil, "dungeon")
+  T.instance = nil ForagerDB.onlyMoving = true T.speed = 0 T.advance(20) check(T.active() == nil, "standing")
+  T.speed = 7 T.advance(0.5) check(T.active() == "Find Herbs", "moving")
+`);
+run('timer mode never captures the keyboard', `
+  T.advance(30) check(ForagerDB.method == "timer", "timer")
+  check(_G.ForagerKeyListener == nil, "no listener frame at all")
 `);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

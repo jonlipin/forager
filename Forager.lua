@@ -1,5 +1,5 @@
--- Forager: switches between Find Herbs and Find Minerals on a set delay while
--- you are out of combat.
+-- Forager: rotates through your tracking spells (Find Herbs and Find Minerals
+-- by default, any others you tick) on a set delay while you are out of combat.
 --
 -- The switch goes through C_Minimap.SetTracking, the call Blizzard's own
 -- tracking menu makes. Classic clients have at times refused it from a timer
@@ -20,14 +20,23 @@ local DEFAULTS = {
     minimapAngle = 225,
     bar = true,            -- the on-screen tracker icons
     barLocked = false,
+    barVertical = false,
+    barCountdown = true,
+    barHideCombat = false,
+    barScale = 100,        -- percent
+    onlyMoving = false,
+    pauseResting = true,   -- cities and inns
+    pauseInstances = true, -- dungeons, raids, battlegrounds, arenas
     -- method: nil = not learned yet, "timer", "key", "none"
+    -- rotation: { [spellID] = true } for the trackers that take part
 }
 
 local db
-local lastSwitch = 0   -- GetTime() of the last change to herbs or minerals
-local lastActive       -- "herbs", "minerals" or nil, as last seen
+local lastSwitch = 0   -- GetTime() of the last change of tracking spell
+local lastActive       -- key of the tracking spell last seen on
 local attempt          -- the switch waiting to be confirmed
 local silentFails = 0
+local failing = {}     -- [key] = GetTime() until which a tracker that failed to cast is skipped
 local RefreshOptions, UpdateMinimapButton, SetUpKeys, UpdateBar, Toggle -- defined below
 
 ---------------------------------------------------------------------------
@@ -49,37 +58,61 @@ end
 -- Tracking
 ---------------------------------------------------------------------------
 
-local function SpellName(id)
-    if C_Spell and C_Spell.GetSpellName then return C_Spell.GetSpellName(id) end
-    if GetSpellInfo then return (GetSpellInfo(id)) end
+local function InRotation(key)
+    return db.rotation[key] == true
 end
 
--- Finds the two tracking entries and what is switched on.
--- other = the name of a tracking spell that is neither of ours, when it is on.
+-- Every tracking spell the character has, in the tracking menu's order.
+--   s.list     { key, index, name, texture, active } per spell
+--   s.byKey    the same, by key (the spell ID, or the name when there is none)
+--   s.rotation the ones ticked to take part
+--   s.active   key of the tracking spell that is on
+--   s.other    name of a tracking spell that is on but not in the rotation
 local function Scan()
-    local s = {}
+    local s = { list = {}, byKey = {}, rotation = {} }
     if not (C_Minimap and C_Minimap.GetNumTrackingTypes and C_Minimap.GetTrackingInfo) then return s end
-    local herbName, mineralName = SpellName(HERBS), SpellName(MINERALS)
     for i = 1, C_Minimap.GetNumTrackingTypes() do
         local info = C_Minimap.GetTrackingInfo(i)
-        if info then
-            local which
-            if info.spellID == HERBS or (herbName and info.name == herbName) then
-                which = "herbs"
-            elseif info.spellID == MINERALS or (mineralName and info.name == mineralName) then
-                which = "minerals"
-            end
-            if which then s[which] = i end
-            if info.active then
-                if which then
-                    s.active = which
-                elseif info.spellID or info.type == "spell" then
-                    s.other = info.name or "another tracking spell"
+        if info and (info.spellID or info.type == "spell") then
+            local key = info.spellID or info.name
+            if key then
+                local e = {
+                    key = key, index = i, name = info.name or tostring(key),
+                    texture = info.texture, active = info.active and true or false,
+                }
+                s.list[#s.list + 1] = e
+                s.byKey[key] = e
+                if InRotation(key) then s.rotation[#s.rotation + 1] = e end
+                if e.active then
+                    s.active = key
+                    if not InRotation(key) then s.other = e.name end
                 end
             end
         end
     end
     return s
+end
+
+local function NameOf(s, key)
+    local e = key and s.byKey[key]
+    return e and e.name or tostring(key)
+end
+
+-- The tracker after the one that is on, skipping any that just failed to cast.
+local function NextEntry(s)
+    local rot = s.rotation
+    local n = #rot
+    if n == 0 then return nil end
+    local pos = 0
+    for i, e in ipairs(rot) do
+        if e.key == s.active then pos = i end
+    end
+    local now = GetTime()
+    for step = 1, n do
+        local e = rot[(pos + step - 1) % n + 1]
+        if e.key ~= s.active and not ((failing[e.key] or 0) > now) then return e end
+    end
+    return nil
 end
 
 local function Busy()
@@ -89,10 +122,10 @@ local function Busy()
     return ok and casting ~= nil
 end
 
-local function OnCooldown()
-    if not (C_Spell and C_Spell.GetSpellCooldown) then return false end
+local function OnCooldown(spellID)
+    if type(spellID) ~= "number" or not (C_Spell and C_Spell.GetSpellCooldown) then return false end
     local ok, onCd = pcall(function()
-        local cd = C_Spell.GetSpellCooldown(HERBS)
+        local cd = C_Spell.GetSpellCooldown(spellID)
         if not cd then return false end
         if issecretvalue and (issecretvalue(cd.startTime) or issecretvalue(cd.duration)) then return false end
         return cd.startTime > 0 and cd.duration > 0 and cd.startTime + cd.duration > GetTime()
@@ -100,17 +133,36 @@ local function OnCooldown()
     return ok and onCd
 end
 
+local function Moving()
+    local ok, moving = pcall(function()
+        local speed = GetUnitSpeed("player")
+        if issecretvalue and issecretvalue(speed) then return true end
+        return speed > 0
+    end)
+    return not ok or moving
+end
+
 -- Returns nil when a switch may happen now, else the reason it may not.
 local function Blocker(s)
-    if not db.enabled then return "switched off" end
+    if not db.enabled then return "paused" end
     if db.method == "none" then return "the game refuses the switch" end
     if InCombatLockdown() or UnitAffectingCombat("player") then return "in combat" end
     if UnitIsDeadOrGhost("player") then return "dead" end
     if UnitOnTaxi("player") then return "on a flight" end
-    if not (s.herbs and s.minerals) then return "you need both Find Herbs and Find Minerals" end
-    if s.other then return s.other .. " is on" end
+    if db.pauseResting and IsResting() then return "in a city or inn" end
+    if db.pauseInstances then
+        local inside, kind = IsInInstance()
+        if inside and kind ~= "none" then return "in a dungeon, raid or battleground" end
+    end
+    if #s.list < 2 then return "this character knows fewer than two tracking spells" end
+    if #s.rotation < 2 then return "tick at least two trackers to rotate" end
+    if s.other then return s.other .. " is on, and it isn't in the rotation" end
+    local nextEntry = NextEntry(s)
+    if not nextEntry then return "the other trackers can't be cast right now" end
     if Busy() then return "casting" end
-    if OnCooldown() then return "global cooldown" end
+    -- Key press mode only switches while you press keys anyway.
+    if db.onlyMoving and db.method ~= "key" and not Moving() then return "standing still" end
+    if OnCooldown(nextEntry.key) then return "global cooldown" end
 end
 
 local function Due()
@@ -124,14 +176,19 @@ local function Verify()
     local s = Scan()
     if s.active == a.target then
         silentFails = 0
-        if db.method == nil then
+        failing[a.target] = nil
+        if db.method == nil and a.source == "timer" then
             db.method = "timer"
             Log("method learned: timer")
         end
-        Log("switched to " .. a.target .. " (" .. a.source .. ")")
+        Log("switched to " .. a.name .. " (" .. a.source .. ")")
+    elseif a.gameError then
+        -- The game said why (wrong form, not enough mana...): skip that one a while.
+        failing[a.target] = GetTime() + 60
+        Log("switch to " .. a.name .. " failed: " .. a.gameError .. ", skipped for 60 s")
     elseif not a.blocked then
         silentFails = silentFails + 1
-        Log("switch to " .. a.target .. " (" .. a.source .. ") did not take, now " .. tostring(s.active) .. ", " .. silentFails .. " in a row")
+        Log("switch to " .. a.name .. " (" .. a.source .. ") did not take, now " .. NameOf(s, s.active) .. ", " .. silentFails .. " in a row")
         if a.source == "timer" and silentFails >= 3 then
             db.method = "key"
             silentFails = 0
@@ -143,18 +200,21 @@ local function Verify()
     if RefreshOptions then RefreshOptions() end
 end
 
+local function Cast(e, source)
+    attempt = { at = GetTime(), target = e.key, name = e.name, source = source }
+    local ok, err = pcall(C_Minimap.SetTracking, e.index, true)
+    if not ok then Log("SetTracking error: " .. tostring(err)) end
+    C_Timer.After(1, Verify)
+end
+
 local function TrySwitch(source)
     if not Due() then return end
     local s = Scan()
     if Blocker(s) then return end
     if attempt and not attempt.done then return end
-    local target = s.active == "herbs" and "minerals" or "herbs"
-    attempt = { at = GetTime(), target = target, source = source }
-    local ok, err = pcall(C_Minimap.SetTracking, s[target], true)
-    if not ok then Log("SetTracking error: " .. tostring(err)) end
+    Cast(NextEntry(s), source)
     -- Count the try as a switch so a refusal is not repeated every tick.
     lastSwitch = GetTime()
-    C_Timer.After(1, Verify)
 end
 
 local function OnTrackingChanged()
@@ -181,12 +241,20 @@ local function OnRefused(event, addon)
         Log("method learned: key")
         Print("the game only allows switching tracking during a key press, so Forager will switch on your next key press after the delay.")
         SetUpKeys()
-    else
+    elseif a.source == "key" then
         db.method = "none"
         Log("method learned: none")
         Print("the game refuses addon tracking switches altogether, so Forager can't switch for you. /forager retest tries again.")
     end
     if RefreshOptions then RefreshOptions() end
+end
+
+-- A red error right after a switch (wrong form, out of mana and so on).
+local function OnGameError(message)
+    local a = attempt
+    if a and not a.done and GetTime() - a.at < 1 and type(message) == "string" then
+        a.gameError = message
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -195,7 +263,7 @@ end
 
 local ABILITY_BINDINGS = {
     "^ACTIONBUTTON", "^MULTIACTIONBAR", "^BONUSACTIONBUTTON", "^SHAPESHIFTBUTTON",
-    "^PETACTIONBUTTON", "^CLICK ", "^SPELL ", "^MACRO ", "^ITEM ", "^INTERACT",
+    "^PETACTIONBUTTON", "^CLICK ", "^SPELL ", "^MACRO ", "^ITEM ", "^INTERACT", "^FORAGER_",
 }
 
 local function IsAbilityKey(key)
@@ -210,22 +278,33 @@ local function IsAbilityKey(key)
     return false
 end
 
-local keyFrame = CreateFrame("Frame", "ForagerKeyListener", UIParent)
+local keyFrame
 local keysReady = false
 
-keyFrame:SetScript("OnKeyDown", function(_, key)
+local function OnKey(_, key)
     if db.method ~= "key" then return end
     if GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus() then return end
     if db.skipAbilityKeys and IsAbilityKey(key) then return end
     TrySwitch("key")
-end)
+end
 
--- The listener lets every key through to the game. Setting that up is not
--- allowed in combat, so it waits for combat to end.
+-- The listener exists only in key press mode. Giving a frame an OnKeyDown
+-- script turns on its keyboard capture by itself, and a frame that captures
+-- without passing keys on swallows the whole keyboard (1.1.0 did exactly
+-- that). So pass-through is switched on first, checked, and only then does
+-- the frame get its script. Setting it up is not allowed in combat.
 SetUpKeys = function()
     if keysReady or db.method ~= "key" then return end
     if InCombatLockdown() then return end
-    keyFrame:SetPropagateKeyboardInput(true)
+    keyFrame = keyFrame or CreateFrame("Frame", "ForagerKeyListener", UIParent)
+    local ok = pcall(keyFrame.SetPropagateKeyboardInput, keyFrame, true)
+    if not ok or (keyFrame.GetPropagateKeyboardInput and not keyFrame:GetPropagateKeyboardInput()) then
+        pcall(keyFrame.EnableKeyboard, keyFrame, false)
+        Log("key listener refused: keys could not be passed through")
+        Print("couldn't watch key presses safely, so switching only happens when you click a tracker icon or use the key binding.")
+        return
+    end
+    keyFrame:SetScript("OnKeyDown", OnKey)
     keyFrame:EnableKeyboard(true)
     keysReady = true
     Log("key listener on")
@@ -234,8 +313,6 @@ end
 ---------------------------------------------------------------------------
 -- Status
 ---------------------------------------------------------------------------
-
-local NAMES = { herbs = "Find Herbs", minerals = "Find Minerals" }
 
 local function MethodText()
     if db.method == "timer" then return "on a timer" end
@@ -246,35 +323,41 @@ end
 
 local function StatusText()
     local s = Scan()
-    local now = s.active and NAMES[s.active] or s.other or "nothing"
-    local lines = { "Tracking: |cffffffff" .. now .. "|r", "Switches " .. MethodText() }
+    local names = {}
+    for _, e in ipairs(s.rotation) do names[#names + 1] = e.name end
+    local lines = {
+        "Tracking: |cffffffff" .. (s.active and NameOf(s, s.active) or "nothing") .. "|r",
+        "Rotating: |cffffffff" .. (#names > 0 and table.concat(names, ", ") or "nothing") .. "|r",
+        "Switches " .. MethodText(),
+    }
     local reason = Blocker(s)
     if reason then
         lines[#lines + 1] = "|cffffb040Waiting: " .. reason .. "|r"
     else
+        local nextName = NextEntry(s).name
         local left = db.delay - (GetTime() - lastSwitch)
         if left > 0 then
-            lines[#lines + 1] = string.format("Next switch in %d s", math.ceil(left))
+            lines[#lines + 1] = string.format("%s in %d s", nextName, math.ceil(left))
         elseif db.method == "key" then
-            lines[#lines + 1] = "Next switch on your next key press"
+            lines[#lines + 1] = nextName .. " on your next key press"
         else
-            lines[#lines + 1] = "Switching now"
+            lines[#lines + 1] = "Switching to " .. nextName
         end
     end
     return table.concat(lines, "\n")
 end
 
 ---------------------------------------------------------------------------
--- Tracker icons: Find Herbs and Find Minerals side by side, the one that is
--- on glows, and a pause / resume button beside them. Same art as the action
--- bars (Conjurer's buttons, seen working on this client).
+-- Tracker icons: one per tracker in the rotation, the one that is on glows,
+-- and a pause / resume button after them. Same art as the action bars and
+-- Conjurer's play and stop buttons, both seen working on this client.
 ---------------------------------------------------------------------------
 
 local SIZE, GAP = 36, 6
-local bar
-local barButtons = {}
-local PAUSE_ART = { "charactercreate-customize-pausebutton", "charactercreate-customize-stopbutton", "CGuy_Stop" }
+local bar, pauseButton
+local trackButtons = {}
 local PLAY_ART = { "charactercreate-customize-playbutton", "common-icon-forwardarrow", "CGuy_Play" }
+local STOP_ART = { "charactercreate-customize-stopbutton", "CGuy_Stop" }
 
 local function HasAtlas(atlas)
     if not (C_Texture and C_Texture.GetAtlasInfo) then return false end
@@ -363,32 +446,58 @@ local function MakeGlow(button)
     return glow, anim
 end
 
-local function SpellIcon(id)
-    if C_Spell and C_Spell.GetSpellTexture then return C_Spell.GetSpellTexture(id) end
-    if GetSpellTexture then return GetSpellTexture(id) end
-end
-
 -- A click is a key press as far as the game is concerned, so this works even
 -- when the timer can't switch.
-local function SwitchTo(which)
+local function SwitchTo(key, source)
     local s = Scan()
-    if s.active == which then return end
+    if s.active == key then return end
     if InCombatLockdown() then Print("tracking can't be switched in combat.") return end
-    if not s[which] then Print("you don't know " .. NAMES[which] .. ".") return end
-    local ok, err = pcall(C_Minimap.SetTracking, s[which], true)
-    Log("clicked " .. which .. (ok and "" or (", error " .. tostring(err))))
+    local e = s.byKey[key]
+    if not e then Print("this character doesn't know that tracking spell.") return end
+    Cast(e, source or "click")
 end
 
+-- The position is the bar's centre in UIParent units, so changing the icon
+-- size grows the bar about its centre.
 local function SaveBarPosition()
-    local point, _, relPoint, x, y = bar:GetPoint(1)
-    if point then db.barPoint = { point, relPoint, x, y } end
+    local x, y = bar:GetCenter()
+    if not x then return end
+    local scale = bar:GetScale()
+    db.barPos = { x * scale, y * scale }
 end
 
 local function PlaceBar()
     bar:ClearAllPoints()
-    local p = db.barPoint
-    if p then bar:SetPoint(p[1], UIParent, p[2], p[3], p[4])
-    else bar:SetPoint("CENTER", UIParent, "CENTER", 0, -180) end
+    local scale = bar:GetScale()
+    local p = db.barPos
+    if p then bar:SetPoint("CENTER", UIParent, "BOTTOMLEFT", p[1] / scale, p[2] / scale)
+    else bar:SetPoint("CENTER", UIParent, "CENTER", 0, -180 / scale) end
+end
+
+-- Lays out the first `count` tracker buttons and the pause button.
+local function LayoutBar(count)
+    if not bar then return end
+    count = count or bar.count or 0
+    bar.count = count
+    bar:SetScale((db.barScale or 100) / 100)
+    local long = SIZE * (count + 1) + GAP * count
+    if db.barVertical then bar:SetSize(SIZE, long) else bar:SetSize(long, SIZE) end
+    local function Put(b, i)
+        local offset = (i - 1) * (SIZE + GAP)
+        b:ClearAllPoints()
+        if db.barVertical then b:SetPoint("TOP", 0, -offset) else b:SetPoint("LEFT", offset, 0) end
+    end
+    for i, b in ipairs(trackButtons) do
+        b:SetShown(i <= count)
+        if i <= count then Put(b, i) end
+    end
+    Put(pauseButton, count + 1)
+    PlaceBar()
+end
+
+local function ResetBarPosition()
+    db.barPos = nil
+    if bar then PlaceBar() end
 end
 
 local function Draggable(button)
@@ -405,7 +514,7 @@ end
 local function Tooltip(button, lines)
     button:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        for i, line in ipairs(lines()) do
+        for i, line in ipairs(lines(self)) do
             if i == 1 then GameTooltip:SetText(line, 1, 1, 1) else GameTooltip:AddLine(line, 0.8, 0.8, 0.8, true) end
         end
         GameTooltip:Show()
@@ -417,43 +526,49 @@ local function MoveHint()
     return db.barLocked and "Right-click: options" or "Drag: move   Right-click: options"
 end
 
+local function TrackButton(i)
+    if trackButtons[i] then return trackButtons[i] end
+    local b = CreateFrame("Button", "ForagerTrackButton" .. i, bar)
+    b:SetSize(SIZE, SIZE)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b.icon = DressIcon(b)
+    b.glow, b.anim = MakeGlow(b)
+    b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
+    b.count:SetPoint("CENTER")
+    b:SetScript("OnClick", function(self, button)
+        if button == "RightButton" then SlashCmdList.FORAGER("") elseif self.key then SwitchTo(self.key) end
+    end)
+    Draggable(b)
+    Tooltip(b, function(self)
+        local s = Scan()
+        return { NameOf(s, self.key), (s.active == self.key) and "|cff7fd96aOn now|r" or "Click: track this now", MoveHint() }
+    end)
+    trackButtons[i] = b
+    return b
+end
+
 local function BuildBar()
     bar = CreateFrame("Frame", "ForagerBar", UIParent)
-    bar:SetSize(SIZE * 3 + GAP * 2, SIZE)
     bar:SetMovable(true)
     bar:SetClampedToScreen(true)
-    PlaceBar()
-
-    for i, which in ipairs({ "herbs", "minerals" }) do
-        local b = CreateFrame("Button", nil, bar)
-        b:SetSize(SIZE, SIZE)
-        b:SetPoint("LEFT", (i - 1) * (SIZE + GAP), 0)
-        b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        b.icon = DressIcon(b)
-        b.icon:SetTexture(SpellIcon(which == "herbs" and HERBS or MINERALS) or ICON)
-        b.glow, b.anim = MakeGlow(b)
-        b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
-        b.count:SetPoint("CENTER")
-        b:SetScript("OnClick", function(_, button)
-            if button == "RightButton" then SlashCmdList.FORAGER("") else SwitchTo(which) end
-        end)
-        Draggable(b)
-        Tooltip(b, function()
-            return { NAMES[which], (Scan().active == which) and "|cff7fd96aOn now|r" or "Click: track this now", MoveHint() }
-        end)
-        barButtons[which] = b
-    end
 
     local p = CreateFrame("Button", "ForagerPauseButton", bar)
     p:SetSize(SIZE, SIZE)
-    p:SetPoint("LEFT", 2 * (SIZE + GAP), 0)
     p:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     p.icon = DressIcon(p)
     p.icon:SetTexture(ICON)
-    p.pauseArt, p.playArt = FirstAtlas(PAUSE_ART), FirstAtlas(PLAY_ART)
-    p.art = p:CreateTexture(nil, "OVERLAY", nil, 2)
-    p.art:SetPoint("CENTER")
-    p.art:SetSize(SIZE * 0.7, SIZE * 0.7)
+    -- Conjurer's Ready button: character creation's play and stop buttons
+    -- laid over the icon, sized as there (30 and 26 on a 42 icon).
+    local play, stop = FirstAtlas(PLAY_ART), FirstAtlas(STOP_ART)
+    p.play = p:CreateTexture(nil, "OVERLAY", nil, 2)
+    p.play:SetPoint("CENTER")
+    p.play:SetSize(SIZE * 30 / 42, SIZE * 30 / 42)
+    if play then p.play:SetAtlas(play) end
+    p.stop = p:CreateTexture(nil, "OVERLAY", nil, 2)
+    p.stop:SetPoint("CENTER")
+    p.stop:SetSize(SIZE * 26 / 42, SIZE * 26 / 42)
+    if stop then p.stop:SetAtlas(stop) end
+    p.playArt, p.stopArt = play, stop
     -- Without the art, words say it instead.
     p.text = p:CreateFontString(nil, "OVERLAY", "GameFontNormalOutline")
     p.text:SetPoint("BOTTOM", 0, 3)
@@ -464,13 +579,15 @@ local function BuildBar()
     Tooltip(p, function()
         return { db.enabled and "Pause Forager" or "Resume Forager", StatusText(), MoveHint() }
     end)
-    barButtons.pause = p
+    pauseButton = p
+    LayoutBar(0)
 end
 
 UpdateBar = function()
     if not db then return end
     local s = Scan()
-    local show = db.bar and (s.herbs or s.minerals) and true or false
+    local show = db.bar and #s.list > 0
+    if db.barHideCombat and (InCombatLockdown() or UnitAffectingCombat("player")) then show = false end
     if not show then
         if bar then bar:Hide() end
         return
@@ -478,34 +595,37 @@ UpdateBar = function()
     if not bar then BuildBar() end
     bar:Show()
 
+    local entries = s.rotation
+    for i, e in ipairs(entries) do
+        local b = TrackButton(i)
+        if b.key ~= e.key then
+            b.key = e.key
+            b.icon:SetTexture(e.texture or ICON)
+        end
+    end
+    if bar.count ~= #entries then LayoutBar(#entries) end
+
     local left = math.ceil(db.delay - (GetTime() - lastSwitch))
-    local counting = db.enabled and left > 0 and not Blocker(s)
-    for _, which in ipairs({ "herbs", "minerals" }) do
-        local b = barButtons[which]
-        local known = s[which] ~= nil
-        b.icon:SetDesaturated(not known)
-        b:SetAlpha(known and 1 or 0.4)
-        local on = s.active == which
+    local nextEntry = (db.enabled and left > 0 and not Blocker(s)) and NextEntry(s)
+    for i = 1, #entries do
+        local b = trackButtons[i]
+        local on = s.active == b.key
         if on ~= b.lit then
             b.lit = on
             b.glow:SetShown(on)
             if on then b.anim:Play() else b.anim:Stop() end
         end
         -- Seconds to the next switch, on the icon that comes next.
-        b.count:SetText((counting and s.active and not on) and left or "")
+        b.count:SetText((db.barCountdown and nextEntry and nextEntry.key == b.key) and left or "")
     end
 
-    local p = barButtons.pause
-    local art = db.enabled and p.pauseArt or p.playArt
+    -- Running: stop art pauses it. Paused: play art resumes it.
+    local p = pauseButton
     p.icon:SetDesaturated(not db.enabled)
-    if art then
-        p.art:SetAtlas(art)
-        p.art:Show()
-        p.text:SetText("")
-    else
-        p.art:Hide()
-        p.text:SetText(db.enabled and "Pause" or "Go")
-    end
+    p.stop:SetShown(db.enabled and p.stopArt ~= nil)
+    p.play:SetShown(not db.enabled and p.playArt ~= nil)
+    local art = db.enabled and p.stopArt or p.playArt
+    p.text:SetText(art and "" or (db.enabled and "Pause" or "Go"))
 end
 
 ---------------------------------------------------------------------------
@@ -515,7 +635,9 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 360, 306
+local W, CONTENT_H = 680, 560
+local COL = 320          -- column width
+local LEFT, RIGHT = 12, 352
 
 local function TryCreate(kind, name, parent, templates)
     for _, template in ipairs(templates) do
@@ -525,13 +647,18 @@ local function TryCreate(kind, name, parent, templates)
     return CreateFrame(kind, name, parent), "bare"
 end
 
-local function OptionCheck(parent, label, key, y, after)
+local function CheckButton(parent, label)
     local cb = TryCreate("CheckButton", nil, parent, { "UICheckButtonTemplate", "ChatConfigCheckButtonTemplate" })
     cb:SetSize(24, 24)
-    cb:SetPoint("TOPLEFT", 12, y)
     cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     cb.label:SetPoint("LEFT", cb, "RIGHT", 2, 0)
-    cb.label:SetText(label)
+    cb.label:SetText(label or "")
+    return cb
+end
+
+local function OptionCheck(parent, label, key, x, y, after)
+    local cb = CheckButton(parent, label)
+    cb:SetPoint("TOPLEFT", x, y)
     cb:SetScript("OnClick", function(self)
         db[key] = self:GetChecked() and true or false
         if after then after() end
@@ -540,11 +667,12 @@ local function OptionCheck(parent, label, key, y, after)
     return cb
 end
 
-local function OptionSlider(parent, label, key, minV, maxV, y)
+local function OptionSlider(parent, label, key, minV, maxV, x, y, unit, step, after)
+    step = step or 1
     local name = "ForagerOptionsSlider" .. key
     local holder = CreateFrame("Frame", nil, parent)
-    holder:SetPoint("TOPLEFT", 16, y)
-    holder:SetSize(W - 40, 40)
+    holder:SetPoint("TOPLEFT", x + 4, y)
+    holder:SetSize(COL - 20, 40)
     local caption = holder:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     caption:SetPoint("TOPLEFT", 0, 0)
     caption:SetText(label)
@@ -558,58 +686,135 @@ local function OptionSlider(parent, label, key, minV, maxV, y)
     end
     if slider.SetOrientation then slider:SetOrientation("HORIZONTAL") end
     slider:SetPoint("TOPLEFT", 2, -18)
-    slider:SetSize(W - 46, 18)
+    slider:SetSize(COL - 26, 18)
     slider:SetMinMaxValues(minV, maxV)
-    if slider.SetValueStep then slider:SetValueStep(1) end
+    if slider.SetValueStep then slider:SetValueStep(step) end
     if slider.SetObeyStepOnDrag then pcall(slider.SetObeyStepOnDrag, slider, true) end
     slider:SetScript("OnValueChanged", function(self, v)
-        v = math.floor(v + 0.5)
-        value:SetText(v .. " s")
+        v = math.floor(v / step + 0.5) * step
+        value:SetText(v .. unit)
         if self.syncing then return end
         db[key] = v
+        if after then after() end
     end)
     optionRefreshers[#optionRefreshers + 1] = function()
         slider.syncing = true
         slider:SetValue(db[key])
         slider.syncing = false
-        value:SetText(db[key] .. " s")
+        value:SetText(db[key] .. unit)
+    end
+end
+
+local function Header(parent, text, x, y)
+    local h = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    h:SetPoint("TOPLEFT", x + 4, y)
+    h:SetText(text)
+    local line = parent:CreateTexture(nil, "ARTWORK")
+    line:SetColorTexture(1, 0.82, 0, 0.25)
+    line:SetPoint("TOPLEFT", x + 4, y - 20)
+    line:SetSize(COL - 20, 1)
+end
+
+local function PanelButton(parent, text, x, y, width, onClick)
+    local b = TryCreate("Button", nil, parent, { "UIPanelButtonTemplate" })
+    b:SetSize(width, 22)
+    b:SetPoint("TOPLEFT", x + 2, y)
+    b:SetText(text)
+    b:SetScript("OnClick", onClick)
+    return b
+end
+
+-- One row per tracking spell the character knows: tick it to rotate it.
+local function TrackerList(parent, x, y)
+    local rows = {}
+    local empty = parent:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+    empty:SetPoint("TOPLEFT", x + 4, y - 4)
+    empty:SetText("This character knows no tracking spells.")
+    optionRefreshers[#optionRefreshers + 1] = function()
+        local s = Scan()
+        empty:SetShown(#s.list == 0)
+        for i, e in ipairs(s.list) do
+            local row = rows[i]
+            if not row then
+                row = CheckButton(parent)
+                row:SetPoint("TOPLEFT", x, y - (i - 1) * 26)
+                row.icon = row:CreateTexture(nil, "ARTWORK")
+                row.icon:SetSize(18, 18)
+                row.icon:SetPoint("LEFT", row, "RIGHT", 2, 0)
+                row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+                row.label:ClearAllPoints()
+                row.label:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+                row:SetScript("OnClick", function(self)
+                    db.rotation[self.key] = self:GetChecked() and true or nil
+                    UpdateBar()
+                    RefreshOptions()
+                end)
+                rows[i] = row
+            end
+            row.key = e.key
+            row.icon:SetTexture(e.texture or ICON)
+            row.label:SetText(e.name .. (e.active and "  |cff7fd96a(on)|r" or ""))
+            row:SetChecked(InRotation(e.key))
+            row:Show()
+        end
+        for i = #s.list + 1, #rows do rows[i]:Hide() end
     end
 end
 
 local function BuildContent()
     local c = CreateFrame("Frame")
     c:SetSize(W, CONTENT_H)
-
-    OptionCheck(c, "Switch between Find Herbs and Find Minerals", "enabled", -8, function()
+    local function Refresh()
         if UpdateMinimapButton then UpdateMinimapButton() end
-        if UpdateBar then UpdateBar() end
-    end)
-    OptionSlider(c, "Time between switches", "delay", 2, 60, -44)
-    OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", -92)
-    OptionCheck(c, "Show the minimap button", "minimap", -120, function()
-        if UpdateMinimapButton then UpdateMinimapButton() end
+        UpdateBar()
+    end
+
+    -- Left column: switching, then which trackers rotate.
+    Header(c, "Switching", LEFT, -4)
+    OptionCheck(c, "Rotate my tracking", "enabled", LEFT, -30, Refresh)
+    OptionSlider(c, "Time between switches", "delay", 2, 60, LEFT, -62, " s")
+    OptionCheck(c, "Only switch while moving", "onlyMoving", LEFT, -106)
+    OptionCheck(c, "Pause in cities and inns", "pauseResting", LEFT, -132)
+    OptionCheck(c, "Pause in dungeons, raids and battlegrounds", "pauseInstances", LEFT, -158)
+    OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", LEFT, -184)
+
+    Header(c, "Trackers to rotate", LEFT, -222)
+    TrackerList(c, LEFT, -248)
+
+    -- Right column: the icons, the minimap button, then status.
+    Header(c, "Tracker icons", RIGHT, -4)
+    OptionCheck(c, "Show the tracker icons", "bar", RIGHT, -30, Refresh)
+    OptionCheck(c, "Lock them in place", "barLocked", RIGHT, -56, Refresh)
+    OptionCheck(c, "Stack them vertically", "barVertical", RIGHT, -82, function() LayoutBar() end)
+    OptionCheck(c, "Count down to the next switch", "barCountdown", RIGHT, -108, Refresh)
+    OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -134, Refresh)
+    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -166, "%", 5, function() LayoutBar() end)
+    PanelButton(c, "Reset position", RIGHT, -212, 130, ResetBarPosition)
+
+    Header(c, "Minimap", RIGHT, -250)
+    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -276, function()
+        UpdateMinimapButton()
+        if not db.minimap then Print("minimap button hidden. /forager opens the options.") end
     end)
 
-    local status = c:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    OptionCheck(c, "Show the tracker icons", "bar", -148, function() UpdateBar() end)
-    OptionCheck(c, "Lock the tracker icons in place", "barLocked", -176, function() UpdateBar() end)
-
-    status:SetPoint("TOPLEFT", 16, -216)
-    status:SetWidth(W - 32)
+    Header(c, "Status", RIGHT, -314)
+    local status = c:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    status:SetPoint("TOPLEFT", RIGHT + 4, -342)
+    status:SetWidth(COL - 20)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)
     optionRefreshers[#optionRefreshers + 1] = function() status:SetText(StatusText()) end
-
-    local retest = TryCreate("Button", nil, c, { "UIPanelButtonTemplate" })
-    retest:SetSize(150, 22)
-    retest:SetPoint("TOPLEFT", 14, -278)
-    retest:SetText("Try the timer again")
-    retest:SetScript("OnClick", function()
+    PanelButton(c, "Try the timer again", RIGHT, -440, 160, function()
         db.method = nil
         silentFails = 0
         Log("method reset from options")
         RefreshOptions()
     end)
+    local hint = c:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hint:SetPoint("TOPLEFT", RIGHT + 4, -476)
+    hint:SetWidth(COL - 20)
+    hint:SetJustifyH("LEFT")
+    hint:SetText("Key bindings for pause / resume, switch now and these options: Options > Keybindings > AddOns > Forager. /forager opens this page.")
 
     -- Keeps the countdown live while the options are open.
     local elapsed = 0
@@ -639,10 +844,12 @@ RefreshOptions = function()
     for _, refresh in ipairs(optionRefreshers) do refresh() end
 end
 
-local function Host(parent, x, y)
+local function Host(parent, x, y, scale)
+    scale = scale or 1
     content:SetParent(parent)
     content:ClearAllPoints()
-    content:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    content:SetScale(scale)
+    content:SetPoint("TOPLEFT", parent, "TOPLEFT", x / scale, y / scale)
     content:Show()
     RefreshOptions()
 end
@@ -687,6 +894,8 @@ local function PageOpen()
         and settingsPage:GetParent() ~= nil and settingsPage:IsVisible()
 end
 
+-- Opens Options > AddOns > Forager. If the game won't show it, a standalone
+-- window is used from then on. A second call closes whichever is open.
 local function ToggleOptions()
     if PageOpen() then
         if SettingsPanel and HideUIPanel then pcall(HideUIPanel, SettingsPanel) end
@@ -701,6 +910,7 @@ local function ToggleOptions()
         pcall(Settings.OpenToCategory, id)
         if PageOpen() then return end
         nativeOpenFailed = true
+        Log("Settings.OpenToCategory did not show the page; using the window")
     end
     if not EnsureContent() then return end
     if not window then
@@ -724,7 +934,10 @@ local function RegisterOptionsPage()
     page:SetScript("OnShow", function(self)
         if not EnsureContent() then return end
         if window and window:IsShown() then window:Hide() end
-        Host(self, 6, -42)
+        local w, h = self:GetWidth() or 0, self:GetHeight() or 0
+        local scale = 1
+        if w > 0 and h > 0 then scale = math.min(1, (w - 12) / W, (h - 50) / CONTENT_H) end
+        Host(self, 6, -42, scale)
     end)
     local category = Settings.RegisterCanvasLayoutCategory(page, "Forager")
     if category then
@@ -734,7 +947,8 @@ local function RegisterOptionsPage()
 end
 
 ---------------------------------------------------------------------------
--- Minimap button: left-click on/off, right-click options, drag to move
+-- Minimap button: left-click opens Options > AddOns > Forager, right-click
+-- pauses / resumes, drag to move
 ---------------------------------------------------------------------------
 
 local mmButton, mmIcon
@@ -785,7 +999,7 @@ UpdateMinimapButton = function()
         border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
 
         mmButton:SetScript("OnClick", function(_, button)
-            if button == "RightButton" then ToggleOptions() else Toggle() end
+            if button == "RightButton" then Toggle() else ToggleOptions() end
         end)
         mmButton:SetScript("OnDragStart", function(self)
             self:SetScript("OnUpdate", function()
@@ -800,11 +1014,11 @@ UpdateMinimapButton = function()
         mmButton:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
         mmButton:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-            GameTooltip:SetText("Forager " .. (db.enabled and "|cff40ff40on|r" or "|cffff4040off|r"), 1, 1, 1)
+            GameTooltip:SetText("Forager " .. (db.enabled and "|cff40ff40running|r" or "|cffff4040paused|r"), 1, 1, 1)
             GameTooltip:AddLine(StatusText(), 0.85, 0.85, 0.85)
             GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("Left-click: pause / resume", 0.7, 0.7, 0.7)
-            GameTooltip:AddLine("Right-click: options", 0.7, 0.7, 0.7)
+            GameTooltip:AddLine("Left-click: options", 0.7, 0.7, 0.7)
+            GameTooltip:AddLine("Right-click: pause / resume", 0.7, 0.7, 0.7)
             GameTooltip:AddLine("Drag: move around the minimap", 0.7, 0.7, 0.7)
             GameTooltip:Show()
         end)
@@ -816,8 +1030,22 @@ UpdateMinimapButton = function()
 end
 
 ---------------------------------------------------------------------------
--- Slash commands
+-- Key bindings (Bindings.xml) and slash commands
 ---------------------------------------------------------------------------
+
+-- A key press may always switch tracking, whatever the timer is allowed.
+BINDING_HEADER_FORAGER = "Forager"
+BINDING_NAME_FORAGER_TOGGLE = "Pause / resume"
+BINDING_NAME_FORAGER_SWITCH = "Switch to the next tracker"
+BINDING_NAME_FORAGER_OPTIONS = "Open options"
+function Forager_Toggle() Toggle() end
+function Forager_SwitchNow()
+    local s = Scan()
+    local e = NextEntry(s)
+    if e then SwitchTo(e.key, "binding")
+    else Print("tick at least two trackers to rotate.") end
+end
+function Forager_Options() ToggleOptions() end
 
 SLASH_FORAGER1 = "/forager"
 SlashCmdList.FORAGER = function(msg)
@@ -837,6 +1065,18 @@ SlashCmdList.FORAGER = function(msg)
         else
             Print("usage: /forager delay <seconds>")
         end
+    elseif cmd == "reset" then
+        ResetBarPosition()
+        Print("tracker icons moved back to the middle of the screen")
+    elseif cmd == "minimap" or cmd == "icons" then
+        local key = cmd == "minimap" and "minimap" or "bar"
+        db[key] = not db[key]
+        UpdateMinimapButton()
+        UpdateBar()
+        RefreshOptions()
+        Print((cmd == "minimap" and "minimap button " or "tracker icons ") .. (db[key] and "shown" or "hidden"))
+    elseif cmd == "switch" then
+        Forager_SwitchNow()
     elseif cmd == "retest" then
         db.method = nil
         silentFails = 0
@@ -845,11 +1085,15 @@ SlashCmdList.FORAGER = function(msg)
     elseif cmd == "debug" then
         local s = Scan()
         Print(StatusText():gsub("\n", " | "))
-        Print(string.format("entries: herbs=%s minerals=%s active=%s other=%s method=%s keys=%s",
-            tostring(s.herbs), tostring(s.minerals), tostring(s.active), tostring(s.other),
-            tostring(db.method), tostring(keysReady)))
+        local known = {}
+        for _, e in ipairs(s.list) do
+            known[#known + 1] = e.name .. "=" .. tostring(e.key) .. (InRotation(e.key) and "*" or "")
+        end
+        Print("trackers (* rotates): " .. (#known > 0 and table.concat(known, ", ") or "none"))
+        Print(string.format("active=%s other=%s method=%s keys=%s",
+            tostring(s.active), tostring(s.other), tostring(db.method), tostring(keysReady)))
     else
-        Print("/forager (options), on, off, toggle, delay <seconds>, retest, debug")
+        Print("/forager (options), on, off, toggle, switch, delay <seconds>, icons, minimap, reset, retest, debug")
     end
 end
 
@@ -862,10 +1106,11 @@ events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("MINIMAP_UPDATE_TRACKING")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
+events:RegisterEvent("UI_ERROR_MESSAGE")
 events:RegisterEvent("ADDON_ACTION_BLOCKED")
 events:RegisterEvent("ADDON_ACTION_FORBIDDEN")
 
-events:SetScript("OnEvent", function(_, event, arg1)
+events:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "ADDON_LOADED" then
         if arg1 ~= ADDON then return end
         ForagerDB = ForagerDB or {}
@@ -873,16 +1118,21 @@ events:SetScript("OnEvent", function(_, event, arg1)
         for k, v in pairs(DEFAULTS) do
             if db[k] == nil then db[k] = v end
         end
+        db.rotation = db.rotation or { [HERBS] = true, [MINERALS] = true }
+        db.barPoint = nil -- 1.1.0 kept the position in another form
         ForagerLog = ForagerLog or {}
         ForagerLog.lines = ForagerLog.lines or {}
         ForagerLog.session = (ForagerLog.session or 0) + 1
     elseif event == "PLAYER_LOGIN" then
         lastSwitch = GetTime()
-        lastActive = Scan().active
         local s = Scan()
-        Log(string.format("login: herbs=%s minerals=%s active=%s other=%s method=%s delay=%s enabled=%s",
-            tostring(s.herbs), tostring(s.minerals), tostring(s.active), tostring(s.other),
-            tostring(db.method), tostring(db.delay), tostring(db.enabled)))
+        lastActive = s.active
+        local known = {}
+        for _, e in ipairs(s.list) do
+            known[#known + 1] = e.name .. "=" .. tostring(e.key) .. (InRotation(e.key) and "*" or "")
+        end
+        Log(string.format("login: trackers %s; active=%s method=%s delay=%s enabled=%s",
+            table.concat(known, ", "), tostring(s.active), tostring(db.method), tostring(db.delay), tostring(db.enabled)))
         RegisterOptionsPage()
         UpdateMinimapButton()
         UpdateBar()
@@ -895,6 +1145,8 @@ events:SetScript("OnEvent", function(_, event, arg1)
         OnTrackingChanged()
     elseif event == "PLAYER_REGEN_ENABLED" then
         SetUpKeys()
+    elseif event == "UI_ERROR_MESSAGE" then
+        OnGameError(arg2)
     else
         OnRefused(event, arg1)
     end
