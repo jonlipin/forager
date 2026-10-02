@@ -6,7 +6,7 @@ const path = require('path');
 const { lua, lauxlib, lualib, to_luastring } = require('fengari');
 
 const STUBS = `
-T = { now = 100, combat = false, blockTimer = false, blockAll = false, frames = {}, timers = {}, prints = {}, bindings = {} }
+T = { anims = {}, now = 100, combat = false, blockTimer = false, blockAll = false, frames = {}, timers = {}, prints = {}, bindings = {} }
 T.tracking = {
   { name = "Find Herbs", spellID = 2383, type = "spell", active = false, texture = 1 },
   { name = "Find Minerals", spellID = 2580, type = "spell", active = false, texture = 2 },
@@ -55,6 +55,12 @@ function Frame:SetScript(n, f) self.scripts[n] = f end
 function Frame:RegisterEvent(e) self.events[e] = true end
 function Frame:EnableKeyboard(on) self.keyboard = on end
 function Frame:SetPropagateKeyboardInput(on) if T.combat then error("protected") end self.propagate = on end
+function Frame:CreateAnimationGroup() local a = setmetatable({ scripts = {}, events = {} }, Frame) T.anims[#T.anims + 1] = a return a end
+function Frame:CreateAnimation() return setmetatable({ scripts = {}, events = {} }, Frame) end
+function Frame:SetShown(on) self.shown = on end
+function Frame:Play() self.playing = true end
+function Frame:Stop() self.playing = false end
+function Frame:SetText(v) self.text = v end
 function Frame:CreateTexture() return setmetatable({ scripts = {}, events = {} }, Frame) end
 function Frame:CreateFontString() return setmetatable({ scripts = {}, events = {} }, Frame) end
 function Frame:GetWidth() return 140 end
@@ -162,6 +168,20 @@ run('slash delay', `
   SlashCmdList.FORAGER("delay 15") check(ForagerDB.delay == 15, "delay set")
   T.advance(14) check(T.active() == nil, "waits 15 s") T.advance(1.5) check(T.active() == "Find Herbs", "then switches")
   SlashCmdList.FORAGER("debug")
+`);
+run('tracker icons glow on the active tracker and pause resumes', `
+  T.advance(6.5) check(T.active() == "Find Herbs", "herbs on")
+  local glows = {}
+  for _, f in ipairs(T.anims) do if true then glows[#glows + 1] = f end end
+  check(#glows == 2, "two glow animations, got " .. #glows)
+  check(glows[1].playing == true and glows[2].playing == false, "herbs glows")
+  T.advance(6.5) check(glows[1].playing == false and glows[2].playing == true, "minerals glows")
+  ForagerPauseButton.scripts.OnClick(ForagerPauseButton, "LeftButton")
+  check(ForagerDB.enabled == false, "paused")
+  T.advance(20) check(T.active() == "Find Minerals", "no switching while paused")
+  ForagerPauseButton.scripts.OnClick(ForagerPauseButton, "LeftButton")
+  check(ForagerDB.enabled == true, "resumed")
+  T.advance(6.5) check(T.active() == "Find Herbs", "switching again")
 `);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

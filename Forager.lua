@@ -18,6 +18,8 @@ local DEFAULTS = {
     skipAbilityKeys = true, -- key press mode: never switch on an ability key
     minimap = true,
     minimapAngle = 225,
+    bar = true,            -- the on-screen tracker icons
+    barLocked = false,
     -- method: nil = not learned yet, "timer", "key", "none"
 }
 
@@ -26,7 +28,7 @@ local lastSwitch = 0   -- GetTime() of the last change to herbs or minerals
 local lastActive       -- "herbs", "minerals" or nil, as last seen
 local attempt          -- the switch waiting to be confirmed
 local silentFails = 0
-local RefreshOptions, UpdateMinimapButton, SetUpKeys -- defined below
+local RefreshOptions, UpdateMinimapButton, SetUpKeys, UpdateBar, Toggle -- defined below
 
 ---------------------------------------------------------------------------
 -- Log, kept in saved variables so a test session can be read after /reload
@@ -162,6 +164,7 @@ local function OnTrackingChanged()
         lastActive = active
         if RefreshOptions then RefreshOptions() end
         if UpdateMinimapButton then UpdateMinimapButton() end
+        if UpdateBar then UpdateBar() end
     end
 end
 
@@ -262,13 +265,257 @@ local function StatusText()
 end
 
 ---------------------------------------------------------------------------
+-- Tracker icons: Find Herbs and Find Minerals side by side, the one that is
+-- on glows, and a pause / resume button beside them. Same art as the action
+-- bars (Conjurer's buttons, seen working on this client).
+---------------------------------------------------------------------------
+
+local SIZE, GAP = 36, 6
+local bar
+local barButtons = {}
+local PAUSE_ART = { "charactercreate-customize-pausebutton", "charactercreate-customize-stopbutton", "CGuy_Stop" }
+local PLAY_ART = { "charactercreate-customize-playbutton", "common-icon-forwardarrow", "CGuy_Play" }
+
+local function HasAtlas(atlas)
+    if not (C_Texture and C_Texture.GetAtlasInfo) then return false end
+    local ok, info = pcall(C_Texture.GetAtlasInfo, atlas)
+    return ok and info ~= nil
+end
+
+local function FirstAtlas(list)
+    for _, atlas in ipairs(list) do
+        if HasAtlas(atlas) then return atlas end
+    end
+end
+
+-- An icon under the action bar's rounded mask, with its frame, pressed art
+-- and hover highlight.
+local function DressIcon(button)
+    local icon = button:CreateTexture(nil, "ARTWORK")
+    icon:SetAllPoints()
+    if HasAtlas("UI-HUD-ActionBar-IconFrame-Mask") and button.CreateMaskTexture then
+        local mask = button:CreateMaskTexture()
+        mask:SetAtlas("UI-HUD-ActionBar-IconFrame-Mask")
+        mask:SetPoint("CENTER", icon, "CENTER")
+        mask:SetSize(SIZE * 64 / 45, SIZE * 64 / 45)
+        icon:AddMaskTexture(mask)
+    else
+        icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    end
+    if HasAtlas("UI-HUD-ActionBar-IconFrame") then
+        local w = SIZE * 46 / 45
+        local border = button:CreateTexture(nil, "OVERLAY")
+        border:SetAtlas("UI-HUD-ActionBar-IconFrame")
+        border:SetPoint("TOPLEFT")
+        border:SetSize(w, SIZE)
+        local pushed = button:CreateTexture(nil, "OVERLAY")
+        pushed:SetAtlas("UI-HUD-ActionBar-IconFrame-Down")
+        pushed:SetPoint("TOPLEFT")
+        pushed:SetSize(w, SIZE)
+        button:SetPushedTexture(pushed)
+        local hl = button:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAtlas("UI-HUD-ActionBar-IconFrame-Mouseover")
+        hl:SetPoint("TOPLEFT")
+        hl:SetSize(w, SIZE)
+        hl:SetBlendMode("ADD")
+    else
+        local hl = button:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetColorTexture(1, 1, 1, 0.15)
+    end
+    return icon
+end
+
+-- The proc glow the action bars use, falling back to a pulsing highlight.
+local function MakeGlow(button)
+    local glow = button:CreateTexture(nil, "OVERLAY", nil, 7)
+    glow:SetPoint("CENTER")
+    glow:SetSize(SIZE * 1.42, SIZE * 1.42)
+    glow:Hide()
+    local anim = glow:CreateAnimationGroup()
+    local flipbook = false
+    if HasAtlas("UI-HUD-ActionBar-Proc-Loop-Flipbook") then
+        glow:SetAtlas("UI-HUD-ActionBar-Proc-Loop-Flipbook")
+        flipbook = pcall(function()
+            local flip = anim:CreateAnimation("FlipBook")
+            flip:SetDuration(1)
+            flip:SetFlipBookRows(6)
+            flip:SetFlipBookColumns(5)
+            flip:SetFlipBookFrames(30)
+            flip:SetFlipBookFrameWidth(0)
+            flip:SetFlipBookFrameHeight(0)
+        end)
+        if flipbook then anim:SetLooping("REPEAT") end
+    end
+    if not flipbook then
+        if HasAtlas("UI-HUD-ActionBar-IconFrame-Mouseover") then
+            glow:SetAtlas("UI-HUD-ActionBar-IconFrame-Mouseover")
+        else
+            glow:SetColorTexture(0.5, 1, 0.4, 0.6)
+        end
+        glow:SetBlendMode("ADD")
+        local pulse = anim:CreateAnimation("Alpha")
+        pulse:SetFromAlpha(0.3)
+        pulse:SetToAlpha(1)
+        pulse:SetDuration(0.6)
+        anim:SetLooping("BOUNCE")
+    end
+    return glow, anim
+end
+
+local function SpellIcon(id)
+    if C_Spell and C_Spell.GetSpellTexture then return C_Spell.GetSpellTexture(id) end
+    if GetSpellTexture then return GetSpellTexture(id) end
+end
+
+-- A click is a key press as far as the game is concerned, so this works even
+-- when the timer can't switch.
+local function SwitchTo(which)
+    local s = Scan()
+    if s.active == which then return end
+    if InCombatLockdown() then Print("tracking can't be switched in combat.") return end
+    if not s[which] then Print("you don't know " .. NAMES[which] .. ".") return end
+    local ok, err = pcall(C_Minimap.SetTracking, s[which], true)
+    Log("clicked " .. which .. (ok and "" or (", error " .. tostring(err))))
+end
+
+local function SaveBarPosition()
+    local point, _, relPoint, x, y = bar:GetPoint(1)
+    if point then db.barPoint = { point, relPoint, x, y } end
+end
+
+local function PlaceBar()
+    bar:ClearAllPoints()
+    local p = db.barPoint
+    if p then bar:SetPoint(p[1], UIParent, p[2], p[3], p[4])
+    else bar:SetPoint("CENTER", UIParent, "CENTER", 0, -180) end
+end
+
+local function Draggable(button)
+    button:RegisterForDrag("LeftButton")
+    button:SetScript("OnDragStart", function()
+        if not db.barLocked then bar:StartMoving() end
+    end)
+    button:SetScript("OnDragStop", function()
+        bar:StopMovingOrSizing()
+        SaveBarPosition()
+    end)
+end
+
+local function Tooltip(button, lines)
+    button:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        for i, line in ipairs(lines()) do
+            if i == 1 then GameTooltip:SetText(line, 1, 1, 1) else GameTooltip:AddLine(line, 0.8, 0.8, 0.8, true) end
+        end
+        GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
+local function MoveHint()
+    return db.barLocked and "Right-click: options" or "Drag: move   Right-click: options"
+end
+
+local function BuildBar()
+    bar = CreateFrame("Frame", "ForagerBar", UIParent)
+    bar:SetSize(SIZE * 3 + GAP * 2, SIZE)
+    bar:SetMovable(true)
+    bar:SetClampedToScreen(true)
+    PlaceBar()
+
+    for i, which in ipairs({ "herbs", "minerals" }) do
+        local b = CreateFrame("Button", nil, bar)
+        b:SetSize(SIZE, SIZE)
+        b:SetPoint("LEFT", (i - 1) * (SIZE + GAP), 0)
+        b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        b.icon = DressIcon(b)
+        b.icon:SetTexture(SpellIcon(which == "herbs" and HERBS or MINERALS) or ICON)
+        b.glow, b.anim = MakeGlow(b)
+        b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
+        b.count:SetPoint("CENTER")
+        b:SetScript("OnClick", function(_, button)
+            if button == "RightButton" then SlashCmdList.FORAGER("") else SwitchTo(which) end
+        end)
+        Draggable(b)
+        Tooltip(b, function()
+            return { NAMES[which], (Scan().active == which) and "|cff7fd96aOn now|r" or "Click: track this now", MoveHint() }
+        end)
+        barButtons[which] = b
+    end
+
+    local p = CreateFrame("Button", "ForagerPauseButton", bar)
+    p:SetSize(SIZE, SIZE)
+    p:SetPoint("LEFT", 2 * (SIZE + GAP), 0)
+    p:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    p.icon = DressIcon(p)
+    p.icon:SetTexture(ICON)
+    p.pauseArt, p.playArt = FirstAtlas(PAUSE_ART), FirstAtlas(PLAY_ART)
+    p.art = p:CreateTexture(nil, "OVERLAY", nil, 2)
+    p.art:SetPoint("CENTER")
+    p.art:SetSize(SIZE * 0.7, SIZE * 0.7)
+    -- Without the art, words say it instead.
+    p.text = p:CreateFontString(nil, "OVERLAY", "GameFontNormalOutline")
+    p.text:SetPoint("BOTTOM", 0, 3)
+    p:SetScript("OnClick", function(_, button)
+        if button == "RightButton" then SlashCmdList.FORAGER("") else Toggle() end
+    end)
+    Draggable(p)
+    Tooltip(p, function()
+        return { db.enabled and "Pause Forager" or "Resume Forager", StatusText(), MoveHint() }
+    end)
+    barButtons.pause = p
+end
+
+UpdateBar = function()
+    if not db then return end
+    local s = Scan()
+    local show = db.bar and (s.herbs or s.minerals) and true or false
+    if not show then
+        if bar then bar:Hide() end
+        return
+    end
+    if not bar then BuildBar() end
+    bar:Show()
+
+    local left = math.ceil(db.delay - (GetTime() - lastSwitch))
+    local counting = db.enabled and left > 0 and not Blocker(s)
+    for _, which in ipairs({ "herbs", "minerals" }) do
+        local b = barButtons[which]
+        local known = s[which] ~= nil
+        b.icon:SetDesaturated(not known)
+        b:SetAlpha(known and 1 or 0.4)
+        local on = s.active == which
+        if on ~= b.lit then
+            b.lit = on
+            b.glow:SetShown(on)
+            if on then b.anim:Play() else b.anim:Stop() end
+        end
+        -- Seconds to the next switch, on the icon that comes next.
+        b.count:SetText((counting and s.active and not on) and left or "")
+    end
+
+    local p = barButtons.pause
+    local art = db.enabled and p.pauseArt or p.playArt
+    p.icon:SetDesaturated(not db.enabled)
+    if art then
+        p.art:SetAtlas(art)
+        p.art:Show()
+        p.text:SetText("")
+    else
+        p.art:Hide()
+        p.text:SetText(db.enabled and "Pause" or "Go")
+    end
+end
+
+---------------------------------------------------------------------------
 -- Options
 ---------------------------------------------------------------------------
 
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 360, 250
+local W, CONTENT_H = 360, 306
 
 local function TryCreate(kind, name, parent, templates)
     for _, template in ipairs(templates) do
@@ -335,6 +582,7 @@ local function BuildContent()
 
     OptionCheck(c, "Switch between Find Herbs and Find Minerals", "enabled", -8, function()
         if UpdateMinimapButton then UpdateMinimapButton() end
+        if UpdateBar then UpdateBar() end
     end)
     OptionSlider(c, "Time between switches", "delay", 2, 60, -44)
     OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", -92)
@@ -343,7 +591,10 @@ local function BuildContent()
     end)
 
     local status = c:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    status:SetPoint("TOPLEFT", 16, -160)
+    OptionCheck(c, "Show the tracker icons", "bar", -148, function() UpdateBar() end)
+    OptionCheck(c, "Lock the tracker icons in place", "barLocked", -176, function() UpdateBar() end)
+
+    status:SetPoint("TOPLEFT", 16, -216)
     status:SetWidth(W - 32)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)
@@ -351,7 +602,7 @@ local function BuildContent()
 
     local retest = TryCreate("Button", nil, c, { "UIPanelButtonTemplate" })
     retest:SetSize(150, 22)
-    retest:SetPoint("TOPLEFT", 14, -222)
+    retest:SetPoint("TOPLEFT", 14, -278)
     retest:SetText("Try the timer again")
     retest:SetScript("OnClick", function()
         db.method = nil
@@ -495,12 +746,13 @@ local function PlaceMinimapButton()
     mmButton:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
 end
 
-local function Toggle(on)
+Toggle = function(on)
     if on == nil then on = not db.enabled end
     db.enabled = on and true or false
     if on then lastSwitch = GetTime() end
-    Print(db.enabled and "on" or "off")
+    Print(db.enabled and "resumed" or "paused")
     UpdateMinimapButton()
+    UpdateBar()
     RefreshOptions()
 end
 
@@ -551,7 +803,7 @@ UpdateMinimapButton = function()
             GameTooltip:SetText("Forager " .. (db.enabled and "|cff40ff40on|r" or "|cffff4040off|r"), 1, 1, 1)
             GameTooltip:AddLine(StatusText(), 0.85, 0.85, 0.85)
             GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("Left-click: switch on / off", 0.7, 0.7, 0.7)
+            GameTooltip:AddLine("Left-click: pause / resume", 0.7, 0.7, 0.7)
             GameTooltip:AddLine("Right-click: options", 0.7, 0.7, 0.7)
             GameTooltip:AddLine("Drag: move around the minimap", 0.7, 0.7, 0.7)
             GameTooltip:Show()
@@ -633,9 +885,11 @@ events:SetScript("OnEvent", function(_, event, arg1)
             tostring(db.method), tostring(db.delay), tostring(db.enabled)))
         RegisterOptionsPage()
         UpdateMinimapButton()
+        UpdateBar()
         SetUpKeys()
         C_Timer.NewTicker(0.25, function()
             if db.method == nil or db.method == "timer" then TrySwitch("timer") end
+            UpdateBar()
         end)
     elseif event == "MINIMAP_UPDATE_TRACKING" then
         OnTrackingChanged()
