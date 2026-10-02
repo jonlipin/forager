@@ -286,5 +286,28 @@ run('the swipe is full after every switch, not only the first', `
   end
   check(T.switches == 4, "four switches, got " .. tostring(T.switches))
 `);
+run('trackers rotate in the order you set', `
+  ForagerDB.rotation[1494] = true
+  SlashCmdList.FORAGER("move beasts up")
+  check(ForagerDB.order[1] == 2383 and ForagerDB.order[2] == 1494 and ForagerDB.order[3] == 2580,
+    "beasts moved above minerals")
+  T.advance(6.5) check(T.active() == "Find Herbs", "1: herbs")
+  T.advance(6.5) check(T.active() == "Track Beasts", "2: beasts, got " .. tostring(T.active()))
+  T.advance(6.5) check(T.active() == "Find Minerals", "3: minerals, got " .. tostring(T.active()))
+  T.advance(6.5) check(T.active() == "Find Herbs", "back to herbs")
+  SlashCmdList.FORAGER("move herbs up")
+  check(ForagerDB.order[1] == 2383, "the top one can't move up")
+  SlashCmdList.FORAGER("move minerals down")
+  check(ForagerDB.order[3] == 2580, "the bottom one can't move down")
+`);
+run('an order saved on another character is kept', `
+  ForagerDB.order = { 9999, 2580, 2383 }
+  T.advance(6.5) check(T.active() == "Find Minerals", "minerals first now")
+  SlashCmdList.FORAGER("move herbs up")
+  check(ForagerDB.order[1] == 2383 and ForagerDB.order[2] == 2580, "herbs on top")
+  local kept = false
+  for _, k in ipairs(ForagerDB.order) do if k == 9999 then kept = true end end
+  check(kept, "the unknown tracker stays in the saved order")
+`);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

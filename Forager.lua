@@ -30,6 +30,8 @@ local DEFAULTS = {
     pauseInstances = true, -- dungeons, raids, battlegrounds, arenas
     -- method: nil = not learned yet, "timer", "key", "none"
     -- rotation: { [spellID] = true } for the trackers that take part
+    -- order: { spellID, ... } the order you set; trackers missing from it
+    --        follow in the tracking menu's order
 }
 
 local db
@@ -83,7 +85,6 @@ local function Scan()
                 }
                 s.list[#s.list + 1] = e
                 s.byKey[key] = e
-                if InRotation(key) then s.rotation[#s.rotation + 1] = e end
                 if e.active then
                     s.active = key
                     if not InRotation(key) then s.other = e.name end
@@ -91,7 +92,34 @@ local function Scan()
             end
         end
     end
+    local rank = {}
+    for i, key in ipairs(db.order) do rank[key] = i end
+    for _, e in ipairs(s.list) do e.rank = rank[e.key] or (100000 + e.index) end
+    table.sort(s.list, function(a, b) return a.rank < b.rank end)
+    for _, e in ipairs(s.list) do
+        if InRotation(e.key) then s.rotation[#s.rotation + 1] = e end
+    end
     return s
+end
+
+-- Moves a tracker one place up (-1) or down (+1). The saved order keeps
+-- trackers this character doesn't know, so another character's order stays.
+local function MoveTracker(key, dir)
+    local s = Scan()
+    local keys = {}
+    for _, e in ipairs(s.list) do keys[#keys + 1] = e.key end
+    local i
+    for n, k in ipairs(keys) do if k == key then i = n end end
+    local j = i and i + dir
+    if not (j and j >= 1 and j <= #keys) then return false end
+    keys[i], keys[j] = keys[j], keys[i]
+    local known = {}
+    for _, k in ipairs(keys) do known[k] = true end
+    for _, k in ipairs(db.order) do
+        if not known[k] then keys[#keys + 1] = k end
+    end
+    db.order = keys
+    return true
 end
 
 local function NameOf(s, key)
@@ -762,7 +790,40 @@ local function PanelButton(parent, text, x, y, width, onClick)
     return b
 end
 
--- One row per tracking spell the character knows: tick it to rotate it.
+-- An up or down arrow, in the minimal scroll bar's art (drawn on this
+-- client by every ScrollFrameTemplate + MinimalScrollBar), else a text button.
+local function OrderArrow(parent, side, tip, keyOf, dir)
+    local base = "minimal-scrollbar-arrow-" .. side
+    local b
+    if HasAtlas(base) then
+        b = CreateFrame("Button", nil, parent)
+        b:SetSize(17, 11)
+        b:SetNormalAtlas(base)
+        if HasAtlas(base .. "-over") then b:SetHighlightAtlas(base .. "-over") end
+        if HasAtlas(base .. "-down") then b:SetPushedAtlas(base .. "-down") end
+    else
+        b = TryCreate("Button", nil, parent, { "UIPanelButtonTemplate" })
+        b:SetSize(22, 18)
+        b:SetText(side == "top" and "^" or "v")
+    end
+    b:SetScript("OnClick", function()
+        if MoveTracker(keyOf(), dir) then
+            UpdateBar()
+            RefreshOptions()
+        end
+    end)
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(tip, 1, 1, 1)
+        GameTooltip:AddLine("Changes the order trackers rotate in.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return b
+end
+
+-- One row per tracking spell the character knows: tick it to rotate it, and
+-- move it up or down to set the order.
 local function TrackerList(parent, x, y)
     local rows = {}
     local empty = parent:CreateFontString(nil, "OVERLAY", "GameFontDisable")
@@ -787,6 +848,10 @@ local function TrackerList(parent, x, y)
                     UpdateBar()
                     RefreshOptions()
                 end)
+                row.up = OrderArrow(parent, "top", "Move up", function() return row.key end, -1)
+                row.up:SetPoint("TOPLEFT", parent, "TOPLEFT", x + COL - 60, y - (i - 1) * 26 - 6)
+                row.down = OrderArrow(parent, "bottom", "Move down", function() return row.key end, 1)
+                row.down:SetPoint("LEFT", row.up, "RIGHT", 6, 0)
                 rows[i] = row
             end
             row.key = e.key
@@ -794,8 +859,18 @@ local function TrackerList(parent, x, y)
             row.label:SetText(e.name .. (e.active and "  |cff7fd96a(on)|r" or ""))
             row:SetChecked(InRotation(e.key))
             row:Show()
+            row.up:Show()
+            row.down:Show()
+            row.up:SetEnabled(i > 1)
+            row.down:SetEnabled(i < #s.list)
+            row.up:SetAlpha(i > 1 and 1 or 0.3)
+            row.down:SetAlpha(i < #s.list and 1 or 0.3)
         end
-        for i = #s.list + 1, #rows do rows[i]:Hide() end
+        for i = #s.list + 1, #rows do
+            rows[i]:Hide()
+            rows[i].up:Hide()
+            rows[i].down:Hide()
+        end
     end
 end
 
@@ -1116,6 +1191,26 @@ SlashCmdList.FORAGER = function(msg)
         Print((cmd == "minimap" and "minimap button " or "tracker icons ") .. (db[key] and "shown" or "hidden"))
     elseif cmd == "switch" then
         Forager_SwitchNow()
+    elseif cmd == "move" then
+        local name, way = arg:match("^(.-)%s+(%a+)$")
+        local dir = way == "up" and -1 or way == "down" and 1 or nil
+        local found
+        if name and dir then
+            for _, e in ipairs(Scan().list) do
+                if e.name:lower():find(name, 1, true) then found = e break end
+            end
+        end
+        if not found then
+            Print("usage: /forager move <tracker name> up|down")
+        elseif MoveTracker(found.key, dir) then
+            UpdateBar()
+            RefreshOptions()
+            local names = {}
+            for _, e in ipairs(Scan().list) do names[#names + 1] = e.name end
+            Print("order: " .. table.concat(names, ", "))
+        else
+            Print(found.name .. " is already at the " .. (dir < 0 and "top" or "bottom") .. ".")
+        end
     elseif cmd == "retest" then
         db.method = nil
         silentFails = 0
@@ -1132,7 +1227,7 @@ SlashCmdList.FORAGER = function(msg)
         Print(string.format("active=%s other=%s method=%s keys=%s",
             tostring(s.active), tostring(s.other), tostring(db.method), tostring(keysReady)))
     else
-        Print("/forager (options), on, off, toggle, switch, delay <seconds>, icons, minimap, reset, retest, debug")
+        Print("/forager (options), on, off, toggle, switch, delay <seconds>, move <tracker> up|down, icons, minimap, reset, retest, debug")
     end
 end
 
@@ -1158,6 +1253,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             if db[k] == nil then db[k] = v end
         end
         db.rotation = db.rotation or { [HERBS] = true, [MINERALS] = true }
+        db.order = db.order or {}
         db.barPoint = nil -- 1.1.0 kept the position in another form
         ForagerLog = ForagerLog or {}
         ForagerLog.lines = ForagerLog.lines or {}
