@@ -783,7 +783,9 @@ local function BuildBar()
     end)
     Draggable(p)
     Tooltip(p, function()
-        return { db.enabled and "Pause Forager" or "Resume Forager", StatusText(), MoveHint() }
+        local key = GetBindingKey("FORAGER_TOGGLE")
+        return { db.enabled and "Pause Forager" or "Resume Forager", StatusText(),
+            key and ("Key: " .. ((GetBindingText and GetBindingText(key)) or key)) or "Set a key in the options", MoveHint() }
     end)
     pauseButton = p
     LayoutBar(0)
@@ -856,7 +858,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 670
+local W, CONTENT_H = 680, 750
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1029,6 +1031,131 @@ local function TrackerList(parent, x, y)
     end
 end
 
+-- Binding names for a key the pause key would take over.
+local function KeyText(key)
+    return (GetBindingText and GetBindingText(key)) or key
+end
+
+local function ActionText(action)
+    return _G["BINDING_NAME_" .. action] or action
+end
+
+local function PauseKeys()
+    return GetBindingKey("FORAGER_TOGGLE")
+end
+
+local MODIFIER_KEYS = {
+    LSHIFT = true, RSHIFT = true, LCTRL = true, RCTRL = true, LALT = true, RALT = true,
+    LMETA = true, RMETA = true, UNKNOWN = true,
+}
+
+-- A button that binds the pause / resume key: click it, press a key. It is
+-- the same binding as Keybindings > AddOns > Forager, so the two agree.
+-- The button takes the keyboard only while it waits for that one key press,
+-- and lets go on the key, on Escape, on a second click and when the options
+-- close: a frame holding the keyboard swallows every key (Forager 1.1.0).
+local function KeyCapture(parent, x, y)
+    local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    label:SetPoint("TOPLEFT", x + 4, y - 4)
+    label:SetText("Pause / resume key")
+
+    local b = TryCreate("Button", "ForagerPauseKeyButton", parent, { "UIPanelButtonTemplate" })
+    b:SetSize(120, 22)
+    b:SetPoint("TOPLEFT", x + 136, y)
+    local clear = TryCreate("Button", "ForagerPauseKeyClear", parent, { "UIPanelButtonTemplate" })
+    clear:SetSize(60, 22)
+    clear:SetPoint("LEFT", b, "RIGHT", 4, 0)
+    clear:SetText("Unbind")
+
+    local note = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    note:SetPoint("TOPLEFT", x + 4, y - 28)
+    note:SetWidth(COL - 20)
+    note:SetJustifyH("LEFT")
+
+    local capturing, pending
+
+    local function Show()
+        if capturing then return end
+        local key = PauseKeys()
+        b:SetText(key and KeyText(key) or "Not bound")
+        clear:SetEnabled(key ~= nil)
+    end
+
+    local function Stop(message)
+        if capturing then
+            capturing, pending = false, nil
+            b:SetScript("OnKeyDown", nil)
+            b:EnableKeyboard(false)
+        end
+        note:SetText(message or "")
+        Show()
+    end
+
+    local function Bind(key)
+        if InCombatLockdown() then
+            Stop("|cffff5050Key bindings can't be changed in combat.|r")
+            return
+        end
+        for _, old in ipairs({ PauseKeys() }) do SetBinding(old) end
+        local before = GetBindingAction(key)
+        local ok = SetBinding(key, "FORAGER_TOGGLE")
+        if not ok then
+            Stop("|cffff5050The game didn't take that key.|r")
+            return
+        end
+        SaveBindings(GetCurrentBindingSet())
+        Log("pause key bound to " .. key .. ((before ~= "" and before ~= "FORAGER_TOGGLE") and (", replacing " .. before) or ""))
+        Stop((before ~= "" and before ~= "FORAGER_TOGGLE") and ("Replaced " .. ActionText(before) .. ".") or nil)
+    end
+
+    local function OnKey(_, key)
+        if MODIFIER_KEYS[key] then return end
+        if key == "ESCAPE" then
+            Stop()
+            return
+        end
+        local full = (IsAltKeyDown() and "ALT-" or "") .. (IsControlKeyDown() and "CTRL-" or "")
+            .. (IsShiftKeyDown() and "SHIFT-" or "") .. key
+        local current = GetBindingAction(full)
+        if current ~= "" and current ~= "FORAGER_TOGGLE" and pending ~= full then
+            pending = full
+            note:SetText("|cffffb040" .. KeyText(full) .. " is used for " .. ActionText(current)
+                .. ". Press it again to use it anyway, or press another key.|r")
+            return
+        end
+        Bind(full)
+    end
+
+    b:SetScript("OnClick", function()
+        if capturing then
+            Stop()
+            return
+        end
+        if InCombatLockdown() then
+            note:SetText("|cffff5050Key bindings can't be changed in combat.|r")
+            return
+        end
+        capturing = true
+        b:SetText("Press a key...")
+        note:SetText("Press the key you want. Escape cancels.")
+        b:SetScript("OnKeyDown", OnKey)
+        b:EnableKeyboard(true)
+    end)
+    clear:SetScript("OnClick", function()
+        Stop()
+        if InCombatLockdown() then
+            note:SetText("|cffff5050Key bindings can't be changed in combat.|r")
+            return
+        end
+        for _, old in ipairs({ PauseKeys() }) do SetBinding(old) end
+        SaveBindings(GetCurrentBindingSet())
+        Log("pause key unbound")
+        Show()
+    end)
+    parent:HookScript("OnHide", function() Stop() end)
+    optionRefreshers[#optionRefreshers + 1] = Show
+end
+
 local function BuildContent()
     local c = CreateFrame("Frame")
     c:SetSize(W, CONTENT_H)
@@ -1077,24 +1204,27 @@ local function BuildContent()
     OptionCheck(c, "Cat Form: Track Humanoids", "swapCatForm", RIGHT, -418)
     OptionCheck(c, "Hunter in a battleground: Track Humanoids", "swapHunterPvP", RIGHT, -444)
 
-    Header(c, "Status", RIGHT, -482)
+    Header(c, "Keys", RIGHT, -482)
+    KeyCapture(c, RIGHT, -508)
+
+    Header(c, "Status", RIGHT, -566)
     local status = c:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    status:SetPoint("TOPLEFT", RIGHT + 4, -510)
+    status:SetPoint("TOPLEFT", RIGHT + 4, -594)
     status:SetWidth(COL - 20)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)
     optionRefreshers[#optionRefreshers + 1] = function() status:SetText(StatusText()) end
-    PanelButton(c, "Try the timer again", RIGHT, -594, 160, function()
+    PanelButton(c, "Try the timer again", RIGHT, -678, 160, function()
         db.method = nil
         silentFails = 0
         Log("method reset from options")
         RefreshOptions()
     end)
     local hint = c:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("TOPLEFT", RIGHT + 4, -628)
+    hint:SetPoint("TOPLEFT", RIGHT + 4, -712)
     hint:SetWidth(COL - 20)
     hint:SetJustifyH("LEFT")
-    hint:SetText("Key bindings for pause / resume, switch now and these options: Options > Keybindings > AddOns > Forager. /forager opens this page.")
+    hint:SetText("More key bindings (switch to the next tracker, open these options): Options > Keybindings > AddOns > Forager. /forager opens this page.")
 
     -- Keeps the countdown live while the options are open.
     local elapsed = 0
@@ -1414,6 +1544,7 @@ events:RegisterEvent("PLAYER_DEAD")
 events:RegisterEvent("LOOT_OPENED")
 events:RegisterEvent("LOOT_CLOSED")
 events:RegisterEvent("PLAYER_LOGOUT")
+events:RegisterEvent("UPDATE_BINDINGS")
 events:RegisterEvent("ADDON_ACTION_BLOCKED")
 events:RegisterEvent("ADDON_ACTION_FORBIDDEN")
 
@@ -1470,6 +1601,8 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         looting = true
     elseif event == "LOOT_CLOSED" then
         looting = false
+    elseif event == "UPDATE_BINDINGS" then
+        if RefreshOptions then RefreshOptions() end
     elseif event == "PLAYER_LOGOUT" then
         Unmute()
     elseif event == "PLAYER_DEAD" then

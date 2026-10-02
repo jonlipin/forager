@@ -45,6 +45,12 @@ function IsAltKeyDown() return false end
 function IsControlKeyDown() return false end
 function IsShiftKeyDown() return false end
 function GetBindingAction(k) return T.bindings[k] or "" end
+function GetBindingKey(a) local keys = {} for k, v in pairs(T.bindings) do if v == a then keys[#keys + 1] = k end end table.sort(keys) return unpack(keys) end
+function SetBinding(k, a) if T.combat then error("protected") end T.bindings[k] = a T.fire("UPDATE_BINDINGS") return true end
+function SaveBindings(set) T.saved = (T.saved or 0) + 1 end
+function GetCurrentBindingSet() return 2 end
+function GetBindingText(k) return k end
+unpack = unpack or table.unpack
 function GetCurrentKeyBoardFocus() return nil end
 function tinsert(t, v) t[#t + 1] = v end
 UISpecialFrames = {}
@@ -106,6 +112,7 @@ function Frame:GetCenter() return nil end
 function Frame:GetFrameLevel() return 1 end
 function Frame:GetChecked() return self.checked end
 function Frame:IsVisible() return false end
+function Frame:HookScript(n, f) local old = self.scripts[n] self.scripts[n] = function(...) if old then old(...) end f(...) end end
 function CreateFrame(kind, name, parent, template)
   local f = setmetatable({ scripts = {}, events = {}, name = name, keyboard = false, propagate = false }, Frame)
   T.frames[#T.frames + 1] = f
@@ -378,6 +385,34 @@ run('hunters track humanoids in battlegrounds', `
   T.class = "HUNTER" T.instance = "pvp"
   T.advance(2) check(T.active() == "Track Humanoids", "humanoids in a battleground, got " .. tostring(T.active()))
   T.class = "MAGE" T.instance = nil
+`);
+run('the pause key button binds a key, warns about a taken one, and lets go of the keyboard', `
+  SlashCmdList.FORAGER("")
+  local b = ForagerPauseKeyButton
+  check(b ~= nil, "the button exists")
+  check(not b.keyboard, "no keyboard before clicking")
+  b.scripts.OnClick(b)
+  check(b.keyboard, "listening after a click")
+  b.scripts.OnKeyDown(b, "LSHIFT") check(b.keyboard, "a modifier alone keeps waiting")
+  b.scripts.OnKeyDown(b, "P")
+  check(T.bindings["P"] == "FORAGER_TOGGLE", "P bound")
+  check(not b.keyboard, "keyboard let go after the key")
+  check(T.saved == 1, "bindings saved")
+  Forager_Toggle() check(ForagerDB.enabled == false, "the binding pauses")
+  Forager_Toggle()
+  T.bindings["W"] = "MOVEFORWARD"
+  b.scripts.OnClick(b) b.scripts.OnKeyDown(b, "W")
+  check(T.bindings["W"] == "MOVEFORWARD" and b.keyboard, "a taken key asks first")
+  b.scripts.OnKeyDown(b, "W")
+  check(T.bindings["W"] == "FORAGER_TOGGLE" and T.bindings["P"] == nil, "pressed again: W replaces P")
+  check(not b.keyboard, "let go")
+  b.scripts.OnClick(b) b.scripts.OnKeyDown(b, "ESCAPE")
+  check(not b.keyboard and T.bindings["W"] == "FORAGER_TOGGLE", "Escape cancels")
+  b.scripts.OnClick(b) ForagerPauseKeyClear.scripts.OnClick(ForagerPauseKeyClear)
+  check(not b.keyboard and GetBindingKey("FORAGER_TOGGLE") == nil, "Unbind clears and lets go")
+  T.combat = true b.scripts.OnClick(b)
+  check(not b.keyboard, "no capture in combat")
+  T.combat = false
 `);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

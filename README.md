@@ -28,7 +28,8 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
   - Hunter in a battleground or arena: Track Humanoids.
   When the moment passes, the rotation picks up again, or your old tracker comes back if the rotation is paused.
 - **Minimap button.** Shows the tracker that's on. Left-click opens the options, right-click pauses or resumes, drag it around the minimap, or hide it.
-- **Key bindings.** Pause / resume, switch to the next tracker, and open the options, under Keybindings > AddOns > Forager.
+- **Pause key.** Set a key to pause and resume right from Forager's options: click the button, press a key. It warns you if the key already does something else.
+- **Key bindings.** Pause / resume, switch to the next tracker, and open the options, also under Keybindings > AddOns > Forager.
 - **Options page** in the game's own Options > AddOns list.
 
 ## Getting started

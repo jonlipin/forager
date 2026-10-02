@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.0 - 2026-10-02
+
+- Set a pause / resume key right from Forager's options: click the button under Keys, press the key you want. Escape cancels, and Unbind clears it.
+- If the key already does something else, Forager tells you what and asks you to press it again before taking it over.
+- It's the same binding as Keybindings > AddOns > Forager > Pause / resume, so the two always agree, and the pause button's tooltip shows the key.
+
 ## 1.6.0 - 2026-10-02
 
 - Quiet switches: every tracking switch plays a sound, so Forager mutes sound effects from the moment it switches until just after the switch lands (2 seconds at most). On by default; turn it off if it ever clips a sound you wanted.
