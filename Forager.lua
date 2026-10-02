@@ -22,6 +22,7 @@ local DEFAULTS = {
     barLocked = false,
     barVertical = false,
     barCountdown = true,
+    barSwipe = true,       -- cooldown swipe on the next tracker
     barHideCombat = false,
     barScale = 100,        -- percent
     onlyMoving = false,
@@ -358,6 +359,8 @@ local bar, pauseButton
 local trackButtons = {}
 local PLAY_ART = { "charactercreate-customize-playbutton", "common-icon-forwardarrow", "CGuy_Play" }
 local STOP_ART = { "charactercreate-customize-stopbutton", "CGuy_Stop" }
+-- The Cooldown Manager's swipe (Range Lens uses it on this client).
+local SWIPE_FILE = "Interface\\HUD\\UI-HUD-CoolDownManager-Icon-Swipe"
 
 local function HasAtlas(atlas)
     if not (C_Texture and C_Texture.GetAtlasInfo) then return false end
@@ -533,7 +536,19 @@ local function TrackButton(i)
     b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     b.icon = DressIcon(b)
     b.glow, b.anim = MakeGlow(b)
-    b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
+    -- The swipe that ticks down to the next switch, inside the icon's frame.
+    b.cd = CreateFrame("Cooldown", nil, b)
+    b.cd:SetPoint("TOPLEFT", 2, -2)
+    b.cd:SetPoint("BOTTOMRIGHT", -2, 2)
+    pcall(b.cd.SetSwipeTexture, b.cd, SWIPE_FILE, 0, 0, 0, 0.75)
+    pcall(b.cd.SetDrawEdge, b.cd, false)
+    pcall(b.cd.SetHideCountdownNumbers, b.cd, true)
+    b.cd:Hide()
+    -- The seconds, on a layer above the swipe.
+    b.textLayer = CreateFrame("Frame", nil, b)
+    b.textLayer:SetAllPoints()
+    b.textLayer:SetFrameLevel(b.cd:GetFrameLevel() + 2)
+    b.count = b.textLayer:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
     b.count:SetPoint("CENTER")
     b:SetScript("OnClick", function(self, button)
         if button == "RightButton" then SlashCmdList.FORAGER("") elseif self.key then SwitchTo(self.key) end
@@ -615,8 +630,21 @@ UpdateBar = function()
             b.glow:SetShown(on)
             if on then b.anim:Play() else b.anim:Stop() end
         end
-        -- Seconds to the next switch, on the icon that comes next.
-        b.count:SetText((db.barCountdown and nextEntry and nextEntry.key == b.key) and left or "")
+        -- Seconds to the next switch, and a swipe ticking down, on the icon
+        -- that comes next.
+        local isNext = nextEntry and nextEntry.key == b.key
+        b.count:SetText((db.barCountdown and isNext) and left or "")
+        if db.barSwipe and isNext then
+            if b.swipeStart ~= lastSwitch or b.swipeDuration ~= db.delay then
+                b.swipeStart, b.swipeDuration = lastSwitch, db.delay
+                pcall(b.cd.SetCooldown, b.cd, lastSwitch, db.delay)
+            end
+            b.cd:Show()
+        elseif b.swipeStart then
+            -- Not Cooldown:Clear(): the game marks it as protected.
+            b.swipeStart, b.swipeDuration = nil, nil
+            b.cd:Hide()
+        end
     end
 
     -- Running: stop art pauses it. Paused: play art resumes it.
@@ -786,32 +814,33 @@ local function BuildContent()
     OptionCheck(c, "Show the tracker icons", "bar", RIGHT, -30, Refresh)
     OptionCheck(c, "Lock them in place", "barLocked", RIGHT, -56, Refresh)
     OptionCheck(c, "Stack them vertically", "barVertical", RIGHT, -82, function() LayoutBar() end)
-    OptionCheck(c, "Count down to the next switch", "barCountdown", RIGHT, -108, Refresh)
-    OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -134, Refresh)
-    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -166, "%", 5, function() LayoutBar() end)
-    PanelButton(c, "Reset position", RIGHT, -212, 130, ResetBarPosition)
+    OptionCheck(c, "Show the seconds to the next switch", "barCountdown", RIGHT, -108, Refresh)
+    OptionCheck(c, "Swipe down to the next switch", "barSwipe", RIGHT, -134, Refresh)
+    OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -160, Refresh)
+    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -192, "%", 5, function() LayoutBar() end)
+    PanelButton(c, "Reset position", RIGHT, -238, 130, ResetBarPosition)
 
-    Header(c, "Minimap", RIGHT, -250)
-    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -276, function()
+    Header(c, "Minimap", RIGHT, -276)
+    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -302, function()
         UpdateMinimapButton()
         if not db.minimap then Print("minimap button hidden. /forager opens the options.") end
     end)
 
-    Header(c, "Status", RIGHT, -314)
+    Header(c, "Status", RIGHT, -340)
     local status = c:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    status:SetPoint("TOPLEFT", RIGHT + 4, -342)
+    status:SetPoint("TOPLEFT", RIGHT + 4, -368)
     status:SetWidth(COL - 20)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)
     optionRefreshers[#optionRefreshers + 1] = function() status:SetText(StatusText()) end
-    PanelButton(c, "Try the timer again", RIGHT, -440, 160, function()
+    PanelButton(c, "Try the timer again", RIGHT, -466, 160, function()
         db.method = nil
         silentFails = 0
         Log("method reset from options")
         RefreshOptions()
     end)
     local hint = c:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("TOPLEFT", RIGHT + 4, -476)
+    hint:SetPoint("TOPLEFT", RIGHT + 4, -502)
     hint:SetWidth(COL - 20)
     hint:SetJustifyH("LEFT")
     hint:SetText("Key bindings for pause / resume, switch now and these options: Options > Keybindings > AddOns > Forager. /forager opens this page.")

@@ -72,6 +72,10 @@ function Frame:SetText(v) self.text = v end
 function Frame:CreateTexture() return setmetatable({ scripts = {}, events = {} }, Frame) end
 function Frame:CreateFontString() return setmetatable({ scripts = {}, events = {} }, Frame) end
 function Frame:GetWidth() return 140 end
+function Frame:SetCooldown(start, dur) self.cdStart, self.cdDur = start, dur end
+function Frame:Show() self.shown = true end
+function Frame:Hide() self.shown = false end
+function Frame:GetFrameLevel() return 1 end
 function Frame:GetScale() return self.scale or 1 end
 function Frame:SetScale(v) self.scale = v end
 function Frame:GetCenter() return nil end
@@ -228,6 +232,19 @@ run('pauses in cities, instances and standing still', `
 run('timer mode never captures the keyboard', `
   T.advance(30) check(ForagerDB.method == "timer", "timer")
   check(_G.ForagerKeyListener == nil, "no listener frame at all")
+`);
+run('a swipe ticks down on the next tracker', `
+  T.advance(6.5) check(T.active() == "Find Herbs", "herbs on")
+  local herbsCd, mineralsCd
+  for _, f in ipairs(T.frames) do
+    if rawget(f, "cdStart") and rawget(f, "shown") then mineralsCd = f end
+  end
+  check(mineralsCd ~= nil and mineralsCd.shown, "swipe running on minerals")
+  check(mineralsCd.cdDur == 6, "over the delay, got " .. tostring(mineralsCd.cdDur) .. " start " .. tostring(mineralsCd.cdStart))
+  T.advance(6.5) check(T.active() == "Find Minerals", "minerals on")
+  check(mineralsCd.shown == false, "no swipe on the tracker that is on")
+  SlashCmdList.FORAGER("off")
+  for _, f in ipairs(T.frames) do if rawget(f, "cdStart") and rawget(f, "shown") then check(false, "no swipe while paused") end end
 `);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
