@@ -38,7 +38,10 @@ function GetCurrentKeyBoardFocus() return nil end
 function tinsert(t, v) t[#t + 1] = v end
 UISpecialFrames = {}
 C_Spell = { GetSpellName = function(id) for _, t in ipairs(T.tracking) do if t.spellID == id then return t.name end end end,
-            GetSpellCooldown = function() return { startTime = 0, duration = 0 } end }
+            GetSpellCooldown = function()
+              if T.landedAt and T.now < T.landedAt + 1.5 then return { startTime = T.landedAt, duration = 1.5 } end
+              return { startTime = 0, duration = 0 }
+            end }
 local fire
 C_Minimap = {
   GetNumTrackingTypes = function() return #T.tracking end,
@@ -267,6 +270,21 @@ run('the swipe starts full when a slow switch lands', `
   check(swipe.cdStart >= landed, "starts when the switch landed (" .. landed .. "), not when asked (" .. swipe.cdStart .. ")")
   check(swipe.cdStart - landed <= 0.25, "within a tick of landing")
   T.advance(6.5) check(T.active() == "Find Minerals", "next one lands too")
+`);
+run('the swipe is full after every switch, not only the first', `
+  T.lag = 0.6
+  for round = 1, 4 do
+    T.advance(7.5)
+    local landed = T.landedAt
+    local swipe
+    for _, f in ipairs(T.frames) do
+      if rawget(f, "cdStart") and rawget(f, "shown") then swipe = f end
+    end
+    check(swipe ~= nil, "round " .. round .. ": swipe showing during the global cooldown")
+    check(swipe.cdStart >= landed and swipe.cdStart - landed <= 0.25,
+      "round " .. round .. ": swipe starts as the switch lands (" .. landed .. "), got " .. tostring(swipe.cdStart))
+  end
+  check(T.switches == 4, "four switches, got " .. tostring(T.switches))
 `);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

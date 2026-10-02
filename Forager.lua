@@ -160,10 +160,17 @@ local function Blocker(s)
     if s.other then return s.other .. " is on, and it isn't in the rotation" end
     local nextEntry = NextEntry(s)
     if not nextEntry then return "the other trackers can't be cast right now" end
-    if Busy() then return "casting" end
     -- Key press mode only switches while you press keys anyway.
     if db.onlyMoving and db.method ~= "key" and not Moving() then return "standing still" end
-    if OnCooldown(nextEntry.key) then return "global cooldown" end
+end
+
+-- Holds back a due switch for a moment without pausing the countdown. Each
+-- switch starts the global cooldown, so counting this as a reason to wait
+-- hid the countdown for 1.5 s after every switch.
+local function Momentary(s)
+    if Busy() then return "casting" end
+    local nextEntry = NextEntry(s)
+    if nextEntry and OnCooldown(nextEntry.key) then return "global cooldown" end
 end
 
 local function Due()
@@ -211,7 +218,7 @@ end
 local function TrySwitch(source)
     if not Due() then return end
     local s = Scan()
-    if Blocker(s) then return end
+    if Blocker(s) or Momentary(s) then return end
     if attempt and not attempt.done then return end
     Cast(NextEntry(s), source)
     -- Count the try as a switch so a refusal is not repeated every tick.
@@ -342,7 +349,8 @@ local function StatusText()
         elseif db.method == "key" then
             lines[#lines + 1] = nextName .. " on your next key press"
         else
-            lines[#lines + 1] = "Switching to " .. nextName
+            local hold = Momentary(s)
+            lines[#lines + 1] = "Switching to " .. nextName .. (hold and (" after the " .. (hold == "casting" and "cast" or hold)) or "")
         end
     end
     return table.concat(lines, "\n")
