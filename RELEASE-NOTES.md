@@ -1,5 +1,5 @@
-## 1.4.0 - 2026-10-02
+## 1.5.0 - 2026-10-02
 
-- Set the order your trackers rotate in: every tracker in the options list has up and down arrows, and the rotation and the tracker icons follow that order.
-- The order is saved account-wide. Trackers a character doesn't know keep their place for the characters that do.
-- New command: /forager move <tracker> up or down, for example /forager move beasts up.
+- Restores tracking after death. Dying clears your tracking; Forager remembers what each character was tracking and turns it back on as soon as you're alive again, whether you're resurrected or take the spirit healer, and even while the rotation is paused.
+- It puts back whatever was on, including a tracker you picked yourself that isn't in the rotation. If you had switched tracking off, it stays off.
+- New option: Restore tracking after death (on by default).

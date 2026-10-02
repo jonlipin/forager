@@ -26,7 +26,8 @@ function print(m) T.prints[#T.prints + 1] = m end
 function debugstack() return "stack" end
 function InCombatLockdown() return T.combat end
 function UnitAffectingCombat() return T.combat end
-function UnitIsDeadOrGhost() return false end
+function UnitIsDeadOrGhost() return T.dead == true end
+function UnitGUID() return "Player-1-0001" end
 function UnitOnTaxi() return false end
 function UnitCastingInfo() return nil end
 function UnitChannelInfo() return nil end
@@ -308,6 +309,33 @@ run('an order saved on another character is kept', `
   local kept = false
   for _, k in ipairs(ForagerDB.order) do if k == 9999 then kept = true end end
   check(kept, "the unknown tracker stays in the saved order")
+`);
+const DIE = `
+  function T.die()
+    T.dead = true
+    for _, t in ipairs(T.tracking) do if t.type == "spell" then t.active = false end end
+    T.fire("PLAYER_DEAD")
+    T.fire("MINIMAP_UPDATE_TRACKING")
+  end
+`
+run('tracking comes back after death', DIE + `
+  T.advance(6.5) check(T.active() == "Find Herbs", "herbs on")
+  T.die() T.advance(30) check(T.active() == nil, "nothing while dead")
+  T.dead = false T.advance(1) check(T.active() == "Find Herbs", "herbs restored, got " .. tostring(T.active()))
+`);
+run('restores after death while paused, and a manual pick too', DIE + `
+  SlashCmdList.FORAGER("off")
+  T.tracking[3].active = true T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
+  T.die() T.advance(5)
+  T.dead = false T.advance(1) check(T.active() == "Track Beasts", "beasts restored while paused, got " .. tostring(T.active()))
+`);
+run('nothing restored when the option is off or tracking was off', DIE + `
+  T.advance(6.5) ForagerDB.restoreAfterDeath = false SlashCmdList.FORAGER("off")
+  T.die() T.dead = false T.advance(2) check(T.active() == nil, "option off")
+  ForagerDB.restoreAfterDeath = true
+  T.tracking[1].active = true T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
+  T.tracking[1].active = false T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
+  T.die() T.dead = false T.advance(2) check(T.active() == nil, "you had switched it off")
 `);
 console.log(`${pass} checks passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

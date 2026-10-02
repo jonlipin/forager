@@ -28,8 +28,10 @@ local DEFAULTS = {
     onlyMoving = false,
     pauseResting = true,   -- cities and inns
     pauseInstances = true, -- dungeons, raids, battlegrounds, arenas
+    restoreAfterDeath = true, -- turn the last tracker back on after you die
     -- method: nil = not learned yet, "timer", "key", "none"
     -- rotation: { [spellID] = true } for the trackers that take part
+    -- lastTracked: { [player GUID] = key or false } for restoring after death
     -- order: { spellID, ... } the order you set; trackers missing from it
     --        follow in the tracking menu's order
 }
@@ -253,9 +255,46 @@ local function TrySwitch(source)
     lastSwitch = GetTime()
 end
 
+-- Death clears tracking. Each character's last tracker is remembered and put
+-- back once you're alive again, whether or not the rotation is running.
+local deathAt, aliveAt
+
+local function RememberTracker(active)
+    local guid = UnitGUID("player")
+    if not guid then return end
+    if active then
+        db.lastTracked[guid] = active
+    elseif not deathAt and not UnitIsDeadOrGhost("player") then
+        -- You switched tracking off yourself: nothing to restore.
+        db.lastTracked[guid] = false
+    end
+end
+
+local function TryRestore()
+    if not deathAt then return end
+    if UnitIsDeadOrGhost("player") then aliveAt = nil return end
+    aliveAt = aliveAt or GetTime()
+    local s = Scan()
+    if not db.restoreAfterDeath or s.active or GetTime() - aliveAt > 30 then
+        deathAt, aliveAt = nil, nil
+        return
+    end
+    if InCombatLockdown() or UnitAffectingCombat("player") or UnitOnTaxi("player") then return end
+    if Momentary(s) or (attempt and not attempt.done) then return end
+    local key = db.lastTracked[UnitGUID("player") or ""]
+    local e = key and s.byKey[key]
+    if not e then
+        deathAt, aliveAt = nil, nil
+        return
+    end
+    Log("restoring " .. e.name .. " after death")
+    Cast(e, "restore")
+end
+
 local function OnTrackingChanged()
     local active = Scan().active
     if active ~= lastActive then
+        RememberTracker(active)
         if active then lastSwitch = GetTime() end
         lastActive = active
         if RefreshOptions then RefreshOptions() end
@@ -701,7 +740,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 560
+local W, CONTENT_H = 680, 590
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -890,9 +929,10 @@ local function BuildContent()
     OptionCheck(c, "Pause in cities and inns", "pauseResting", LEFT, -132)
     OptionCheck(c, "Pause in dungeons, raids and battlegrounds", "pauseInstances", LEFT, -158)
     OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", LEFT, -184)
+    OptionCheck(c, "Restore tracking after death", "restoreAfterDeath", LEFT, -210)
 
-    Header(c, "Trackers to rotate", LEFT, -222)
-    TrackerList(c, LEFT, -248)
+    Header(c, "Trackers to rotate", LEFT, -248)
+    TrackerList(c, LEFT, -274)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
@@ -1241,6 +1281,7 @@ events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("MINIMAP_UPDATE_TRACKING")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
 events:RegisterEvent("UI_ERROR_MESSAGE")
+events:RegisterEvent("PLAYER_DEAD")
 events:RegisterEvent("ADDON_ACTION_BLOCKED")
 events:RegisterEvent("ADDON_ACTION_FORBIDDEN")
 
@@ -1254,6 +1295,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         end
         db.rotation = db.rotation or { [HERBS] = true, [MINERALS] = true }
         db.order = db.order or {}
+        db.lastTracked = db.lastTracked or {}
         db.barPoint = nil -- 1.1.0 kept the position in another form
         ForagerLog = ForagerLog or {}
         ForagerLog.lines = ForagerLog.lines or {}
@@ -1262,6 +1304,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         lastSwitch = GetTime()
         local s = Scan()
         lastActive = s.active
+        RememberTracker(s.active)
         local known = {}
         for _, e in ipairs(s.list) do
             known[#known + 1] = e.name .. "=" .. tostring(e.key) .. (InRotation(e.key) and "*" or "")
@@ -1277,6 +1320,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             -- so the change is also looked for here; the countdown starts
             -- when the switch has really happened.
             OnTrackingChanged()
+            TryRestore()
             if db.method == nil or db.method == "timer" then TrySwitch("timer") end
             UpdateBar()
         end)
@@ -1286,6 +1330,9 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         SetUpKeys()
     elseif event == "UI_ERROR_MESSAGE" then
         OnGameError(arg2)
+    elseif event == "PLAYER_DEAD" then
+        deathAt, aliveAt = GetTime(), nil
+        Log("died; tracker to restore: " .. tostring(db.lastTracked[UnitGUID("player") or ""]))
     else
         OnRefused(event, arg1)
     end

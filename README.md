@@ -19,6 +19,7 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
   - Pauses in cities and inns, and in dungeons, raids and battlegrounds (both optional).
   - Can switch only while you're moving.
   - Picked a tracker yourself that isn't in the rotation? Forager leaves it on until you switch back.
+- **Restores tracking after death.** Dying clears your tracking. Forager remembers what each character was tracking and turns it back on as soon as you're alive again, even with the rotation paused.
 - **Skips trackers that can't be cast right now.** For example a druid's Track Humanoids outside Cat Form is skipped for a minute instead of failing over and over.
 - **Minimap button.** Left-click opens the options, right-click pauses or resumes, drag it around the minimap, or hide it.
 - **Key bindings.** Pause / resume, switch to the next tracker, and open the options, under Keybindings > AddOns > Forager.
