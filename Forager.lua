@@ -7,7 +7,9 @@
 -- timer; if the game blocks that, it remembers and from then on makes each
 -- switch on your next key press after the delay, leaving ability keys alone.
 
-local ADDON = ...
+local ADDON, ns = ...
+-- Lines for /forager debug from Styles.lua (the "skin" state and any errors).
+ns.report = {}
 
 local HERBS, MINERALS = 2383, 2580
 local ICON = "Interface\\Icons\\INV_Misc_Flower_02"
@@ -35,6 +37,9 @@ local DEFAULTS = {
     swapFishing = true,    -- fishing pole equipped: Find Fish
     swapCatForm = true,    -- Cat Form: Track Humanoids
     swapHunterPvP = true,  -- hunter in a battleground or arena: Track Humanoids
+    style = "auto",        -- window style: "auto", "blizzard" or "dark" (Styles.lua)
+    darkAlpha = 0.92,      -- the Dark style's background opacity
+    iconShape = "auto",    -- tracker icons: "auto" (square while a style is drawn), "round" or "square"
     -- method: nil = not learned yet, "timer", "key", "none"
     -- rotation: { [spellID] = true } for the trackers that take part
     -- lastTracked: { [player GUID] = key or false } for restoring after death
@@ -43,7 +48,8 @@ local DEFAULTS = {
 }
 
 local db
-local lastSwitch = 0   -- GetTime() of the last change of tracking spell
+function ns.DB() return db end
+local lastSwitch = 0  -- GetTime() of the last change of tracking spell
 local lastActive       -- key of the tracking spell last seen on
 local attempt          -- the switch waiting to be confirmed
 local silentFails = 0
@@ -65,6 +71,8 @@ local function Log(msg)
     lines[#lines + 1] = "#" .. ForagerLog.session .. " " .. date("%H:%M:%S") .. " " .. msg
     while #lines > 400 do table.remove(lines, 1) end
 end
+
+ns.Log = Log
 
 local function Print(msg)
     print("|cff7fd96aForager|r: " .. msg)
@@ -546,8 +554,10 @@ end
 ---------------------------------------------------------------------------
 
 local SIZE, GAP = 36, 6
+ns.ICON_SIZE = SIZE
 local bar, pauseButton
 local trackButtons = {}
+ns.trackButtons = trackButtons
 local PLAY_ART = { "charactercreate-customize-playbutton", "common-icon-forwardarrow", "CGuy_Play" }
 local STOP_ART = { "charactercreate-customize-stopbutton", "CGuy_Stop" }
 -- The Cooldown Manager's swipe (Range Lens uses it on this client).
@@ -576,8 +586,11 @@ local function DressIcon(button)
         mask:SetPoint("CENTER", icon, "CENTER")
         mask:SetSize(SIZE * 64 / 45, SIZE * 64 / 45)
         icon:AddMaskTexture(mask)
+        button.fgMask = mask
+        button.fgRound = { 0, 1, 0, 1 } -- the crop, for a window style that squares the icon
     else
         icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        button.fgRound = { 0.07, 0.93, 0.07, 0.93 }
     end
     if HasAtlas("UI-HUD-ActionBar-IconFrame") then
         local w = SIZE * 46 / 45
@@ -595,6 +608,8 @@ local function DressIcon(button)
         hl:SetPoint("TOPLEFT")
         hl:SetSize(w, SIZE)
         hl:SetBlendMode("ADD")
+        -- The action bar art, for a window style that squares the icon.
+        button.fgFrame, button.fgPushed, button.fgHighlight = border, pushed, hl
     else
         local hl = button:CreateTexture(nil, "HIGHLIGHT")
         hl:SetAllPoints()
@@ -651,8 +666,8 @@ local function SwitchTo(key, source)
     Cast(e, source or "click")
 end
 
--- The position is the bar's centre in UIParent units, so changing the icon
--- size grows the bar about its centre.
+-- The position is the bar's center in UIParent units, so changing the icon
+-- size grows the bar about its center.
 local function SaveBarPosition()
     local x, y = bar:GetCenter()
     if not x then return end
@@ -750,6 +765,7 @@ local function TrackButton(i)
         return { NameOf(s, self.key), (s.active == self.key) and "|cff7fd96aOn now|r" or "Click: track this now", MoveHint() }
     end)
     trackButtons[i] = b
+    if ns.ShapeIcon then ns.ShapeIcon(b) end
     return b
 end
 
@@ -788,6 +804,8 @@ local function BuildBar()
             key and ("Key: " .. ((GetBindingText and GetBindingText(key)) or key)) or "Set a key in the options", MoveHint() }
     end)
     pauseButton = p
+    ns.pauseButton = p
+    if ns.SkinPauseButton then ns.SkinPauseButton(p) end
     LayoutBar(0)
 end
 
@@ -858,7 +876,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 750
+local W, CONTENT_H = 680, 800
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -890,8 +908,10 @@ local function OptionCheck(parent, label, key, x, y, after)
     return cb
 end
 
-local function OptionSlider(parent, label, key, minV, maxV, x, y, unit, step, after)
+-- factor: the slider shows db[key] * factor (a 0 to 1 setting as a percent).
+local function OptionSlider(parent, label, key, minV, maxV, x, y, unit, step, after, factor)
     step = step or 1
+    factor = factor or 1
     local name = "ForagerOptionsSlider" .. key
     local holder = CreateFrame("Frame", nil, parent)
     holder:SetPoint("TOPLEFT", x + 4, y)
@@ -917,15 +937,17 @@ local function OptionSlider(parent, label, key, minV, maxV, x, y, unit, step, af
         v = math.floor(v / step + 0.5) * step
         value:SetText(v .. unit)
         if self.syncing then return end
-        db[key] = v
+        db[key] = v / factor
         if after then after() end
     end)
     optionRefreshers[#optionRefreshers + 1] = function()
+        local shown = math.floor(db[key] * factor + 0.5)
         slider.syncing = true
-        slider:SetValue(db[key])
+        slider:SetValue(shown)
         slider.syncing = false
-        value:SetText(db[key] .. unit)
+        value:SetText(shown .. unit)
     end
+    return slider, caption, value
 end
 
 local function Header(parent, text, x, y)
@@ -1156,6 +1178,86 @@ local function KeyCapture(parent, x, y)
     optionRefreshers[#optionRefreshers + 1] = Show
 end
 
+-- The window style (Styles.lua does the choosing and the drawing) and the
+-- Dark style's opacity, which is grayed out for the other styles.
+local function LookSection(parent, x, y)
+    local styleButton = PanelButton(parent, "", x, y, 200, function(_, button)
+        if ns.Styles then ns.Styles.Cycle(button == "RightButton" and -1 or 1) end
+        RefreshOptions()
+    end)
+    styleButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    styleButton:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Window style", 1, 1, 1)
+        for _, line in ipairs(ns.Styles and ns.Styles.HELP or {}) do GameTooltip:AddLine(line, nil, nil, nil, true) end
+        GameTooltip:AddLine("Left-click for the next style, right-click for the previous one.", 0.6, 0.6, 0.6, true)
+        GameTooltip:Show()
+    end)
+    styleButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    local note = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    note:SetPoint("TOPLEFT", x + 4, y - 26)
+    note:SetWidth(COL - 20)
+    note:SetJustifyH("LEFT")
+    local slider, caption, value = OptionSlider(parent, "Dark background opacity", "darkAlpha", 0, 100, x, y - 58, "%", 5,
+        function() if ns.Styles then ns.Styles.SetDarkAlpha(db.darkAlpha) end end, 100)
+    slider:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Dark background opacity", 1, 1, 1)
+        GameTooltip:AddLine("How much of the world shows through the Dark style's window.", nil, nil, nil, true)
+        if db.style ~= "dark" then GameTooltip:AddLine("Applies to the Dark style only.", 1, 0.82, 0, true) end
+        GameTooltip:Show()
+    end)
+    slider:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    optionRefreshers[#optionRefreshers + 1] = function()
+        local Styles = ns.Styles
+        styleButton:SetText("Window style: " .. (Styles and Styles.Name(db.style) or "Blizzard"))
+        note:SetText(Styles and Styles.Note() or "")
+        local dark = db.style == "dark"
+        slider:SetEnabled(dark)
+        slider:SetAlpha(dark and 1 or 0.5)
+        caption:SetFontObject(dark and GameFontHighlight or GameFontDisable)
+        value:SetFontObject(dark and GameFontNormalSmall or GameFontDisable)
+    end
+    slider.fgCaption, slider.fgValue = caption, value
+    ns.styleButton, ns.opacitySlider = styleButton, slider
+end
+
+-- Tracker icons round (the action bars' own art) or square, in any window
+-- style. Automatic follows the style; the change shows at once.
+local SHAPES = { "auto", "round", "square" }
+local SHAPE_NAMES = { auto = "Automatic", round = "Round", square = "Square" }
+
+local function SetIconShape(shape)
+    db.iconShape = shape
+    if ns.UpdateIconShapes then ns.UpdateIconShapes() end
+    RefreshOptions()
+end
+
+local function ShapeButton(parent, x, y)
+    local b = PanelButton(parent, "", x, y, 176, function(_, mouse)
+        local i = 1
+        for n, shape in ipairs(SHAPES) do if shape == db.iconShape then i = n end end
+        i = (i - 1 + (mouse == "RightButton" and -1 or 1)) % #SHAPES + 1
+        SetIconShape(SHAPES[i])
+    end)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Icon shape", 1, 1, 1)
+        GameTooltip:AddLine("Automatic: square in the Dark and EllesmereUI styles, the action bars' look with Blizzard's.", nil, nil, nil, true)
+        GameTooltip:AddLine("Round: circles, in a ring like the minimap buttons' with Blizzard's style, with a thin dark edge in the others.", nil, nil, nil, true)
+        GameTooltip:AddLine("Square: cropped square icons with a thin edge.", nil, nil, nil, true)
+        GameTooltip:AddLine("The pause button follows the window style.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Left-click for the next shape, right-click for the previous one.", 0.6, 0.6, 0.6, true)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    optionRefreshers[#optionRefreshers + 1] = function()
+        b:SetText("Icon shape: " .. (SHAPE_NAMES[db.iconShape] or SHAPE_NAMES.auto))
+    end
+    ns.shapeButton = b
+end
+
 local function BuildContent()
     local c = CreateFrame("Frame")
     c:SetSize(W, CONTENT_H)
@@ -1178,8 +1280,12 @@ local function BuildContent()
     OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", LEFT, -236)
     OptionCheck(c, "Restore tracking after death", "restoreAfterDeath", LEFT, -262)
 
-    Header(c, "Trackers to rotate", LEFT, -300)
-    TrackerList(c, LEFT, -326)
+    -- Above the tracker list, whose length depends on the character.
+    Header(c, "Look", LEFT, -300)
+    LookSection(c, LEFT, -326)
+
+    Header(c, "Trackers to rotate", LEFT, -450)
+    TrackerList(c, LEFT, -476)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
@@ -1191,6 +1297,7 @@ local function BuildContent()
     OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -160, Refresh)
     OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -192, "%", 5, function() LayoutBar() end)
     PanelButton(c, "Reset position", RIGHT, -238, 130, ResetBarPosition)
+    ShapeButton(c, RIGHT + 138, -238)
 
     Header(c, "Minimap", RIGHT, -276)
     OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -302, function()
@@ -1293,9 +1400,17 @@ local function BuildWindow()
     if not (f.CloseButton or _G["ForagerOptionsCloseButton"]) then
         local close = TryCreate("Button", nil, f, { "UIPanelCloseButton" })
         close:SetPoint("TOPRIGHT", 2, 2)
-        close:SetScript("OnClick", function() f:Hide() end)
+        f.fgClose = close
     end
+    -- The template's own X goes through HideUIPanel, which this client refuses in combat
+    -- ("Interface action blocked"), so every X hides the window itself.
+    local close = f.CloseButton
+    if type(close) ~= "table" then close = _G["ForagerOptionsCloseButton"] end
+    if type(close) ~= "table" then close = f.fgClose end
+    if type(close) == "table" and close.SetScript then close:SetScript("OnClick", function() f:Hide() end) end
     f:SetScript("OnShow", function(self) Host(self, 0, top) end)
+    ns.window = f
+    if ns.SkinWindow then ns.SkinWindow(f) end
     return f
 end
 
@@ -1338,17 +1453,25 @@ end
 local function RegisterOptionsPage()
     if not (Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory) then return end
     local page = CreateFrame("Frame")
+    -- Hidden until the game's panel shows it. A frame made without a parent is shown (and counts
+    -- as visible), so when the panel moved it into an already open window and called Show,
+    -- OnShow never ran and the first visit from Esc > Options > AddOns found only the title.
+    page:Hide()
     local title = page:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText("Forager")
-    page:SetScript("OnShow", function(self)
+    local function Fill(self)
         if not EnsureContent() then return end
         if window and window:IsShown() then window:Hide() end
         local w, h = self:GetWidth() or 0, self:GetHeight() or 0
         local scale = 1
         if w > 0 and h > 0 then scale = math.min(1, (w - 12) / W, (h - 50) / CONTENT_H) end
         Host(self, 6, -42, scale)
-    end)
+    end
+    page:SetScript("OnShow", Fill)
+    -- The page's size can arrive after OnShow: fit again then, and bring the controls here if
+    -- they are not here yet.
+    page:SetScript("OnSizeChanged", function(self) if self:IsVisible() then Fill(self) end end)
     local category = Settings.RegisterCanvasLayoutCategory(page, "Forager")
     if category then
         Settings.RegisterAddOnCategory(category)
@@ -1366,6 +1489,9 @@ local mmButton, mmIcon
 local function PlaceMinimapButton()
     local angle = math.rad(db.minimapAngle or 225)
     local radius = (Minimap:GetWidth() or 140) / 2 + 6
+    -- Only while it sits on the minimap. A button collector (EllesmereUI's, for one) that
+    -- has taken the button keeps it where it put it.
+    if mmButton:GetParent() ~= Minimap then return end
     mmButton:ClearAllPoints()
     mmButton:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
 end
@@ -1525,8 +1651,30 @@ SlashCmdList.FORAGER = function(msg)
         Print("trackers (* rotates): " .. (#known > 0 and table.concat(known, ", ") or "none"))
         Print(string.format("active=%s other=%s method=%s keys=%s",
             tostring(s.active), tostring(s.other), tostring(db.method), tostring(keysReady)))
+        Print("skin: " .. tostring(ns.report.skin or "Blizzard") .. "; window style setting " .. tostring(db.style)
+            .. ", Dark opacity " .. math.floor(db.darkAlpha * 100 + 0.5) .. "%, icon shape " .. tostring(db.iconShape)
+            .. (ns.IconShape and (" (" .. ns.IconShape() .. ")") or ""))
+        for key, value in pairs(ns.report) do
+            if key:find("^skin error") then Print(key .. ": " .. tostring(value)) end
+        end
+    elseif cmd == "style" then
+        local Styles = ns.Styles
+        if not Styles then return end
+        if arg == "auto" or arg == "automatic" then Styles.Set("auto")
+        elseif arg == "blizzard" or arg == "dark" then Styles.Set(arg)
+        elseif arg == "" then Styles.Cycle(1)
+        else Print("styles: auto, blizzard, dark.") return end
+        RefreshOptions()
+        Print("window style: " .. Styles.Name(db.style) .. ". " .. Styles.Note())
+    elseif cmd == "shape" then
+        if arg == "automatic" then arg = "auto" end
+        if SHAPE_NAMES[arg] then SetIconShape(arg)
+        elseif arg ~= "" then Print("shapes: auto, round, square.") return end
+        local looks = { bar = "the action bar look", square = "square", ["circle-ring"] = "round", ["circle-edge"] = "round" }
+        Print("icon shape: " .. (SHAPE_NAMES[db.iconShape] or SHAPE_NAMES.auto)
+            .. (ns.IconShape and (", now " .. (looks[ns.IconShape()] or ns.IconShape())) or "") .. ".")
     else
-        Print("/forager (options), on, off, toggle, switch, delay <seconds>, move <tracker> up|down, icons, minimap, reset, retest, debug")
+        Print("/forager (options), on, off, toggle, switch, delay <seconds>, move <tracker> up|down, icons, minimap, reset, style [auto|blizzard|dark], shape [auto|round|square], retest, debug")
     end
 end
 

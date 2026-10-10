@@ -2,12 +2,15 @@
 ## Title: Forager
 ## Notes: Rotates through your tracking spells (Find Herbs, Find Minerals and any others you pick) on a set delay while you are out of combat.
 ## Author: jonlipin
-## Version: 1.7.0
+## Version: 1.8.0
 ## SavedVariables: ForagerDB, ForagerLog
 ## LoadSavedVariablesFirst: 1
+## OptionalDeps: EllesmereUI
 ## IconTexture: Interface\Icons\INV_Misc_Flower_02
 ## X-Category: Professions
 ## X-Website: https://github.com/jonlipin/forager
 ## X-License: MIT
 
 Forager.lua
+Styles.lua
+Forager_Skins.lua

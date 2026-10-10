@@ -31,6 +31,7 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
 - **Pause key.** Set a key to pause and resume right from Forager's options: click the button, press a key. It warns you if the key already does something else.
 - **Key bindings.** Pause / resume, switch to the next tracker, and open the options, also under Keybindings > AddOns > Forager.
 - **Options page** in the game's own Options > AddOns list.
+- **Look.** Pick the window style for the tracker icons and the options window: Automatic (EllesmereUI's look when EllesmereUI is installed, otherwise Blizzard), Blizzard or Dark, with a background opacity slider for Dark. The tracker icons can be round or square in any style.
 
 ## Getting started
 
@@ -47,6 +48,8 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
 - **/forager delay 10** sets the time between switches in seconds
 - **/forager icons**, **/forager minimap** show or hide the tracker icons and the minimap button
 - **/forager reset** moves the tracker icons back to the middle of the screen
+- **/forager style auto**, **blizzard** or **dark** sets the window style
+- **/forager shape auto**, **round** or **square** sets the shape of the tracker icons
 - **/forager debug** prints what Forager sees
 
 ## How the switching works
