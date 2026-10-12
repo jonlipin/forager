@@ -9,7 +9,7 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
 - **Auto tracking rotation.** Switches tracking every 2 to 60 seconds (you choose) while you're out of combat.
 - **Any tracking spell, in your order.** Find Herbs and Find Minerals are on by default. Tick any other tracker your character knows to add it, and use the up and down arrows to set the order they rotate in.
 - **Tracker icons on screen.**
-  - The tracker that's on glows like a proc on your action bars.
+  - The tracker that's on glows like a proc on your action bars, with optional sparkles around it (eight effects, size and intensity sliders).
   - The next one shows a cooldown swipe and the seconds until it switches.
   - Click an icon to switch to it straight away.
   - A play / stop button pauses and resumes the rotation.
@@ -50,6 +50,7 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
 - **/forager reset** moves the tracker icons back to the middle of the screen
 - **/forager style auto**, **blizzard** or **dark** sets the window style
 - **/forager shape auto**, **round** or **square** sets the shape of the tracker icons
+- **/forager sparkles** turns the sparkles on or off; **/forager sparkles next** picks the next effect
 - **/forager debug** prints what Forager sees
 
 ## How the switching works

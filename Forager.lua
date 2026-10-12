@@ -39,6 +39,9 @@ local DEFAULTS = {
     swapHunterPvP = true,  -- hunter in a battleground or arena: Track Humanoids
     style = "auto",        -- window style: "auto", "blizzard" or "dark" (Styles.lua)
     darkAlpha = 0.92,      -- the Dark style's background opacity
+    sparkles = true,       -- sparkles round the active tracker's border
+    sparkleSize = 100,     -- percent: how far out they reach
+    sparkleIntensity = 100, -- percent: how strong they are
     iconShape = "auto",    -- tracker icons: "auto" (square while a style is drawn), "round" or "square"
     -- method: nil = not learned yet, "timer", "key", "none"
     -- rotation: { [spellID] = true } for the trackers that take part
@@ -743,11 +746,30 @@ local function TrackButton(i)
     b.icon = DressIcon(b)
     b.glow, b.anim = MakeGlow(b)
     -- The swipe that ticks down to the next switch, inside the icon's frame.
-    b.cd = CreateFrame("Cooldown", nil, b)
+    -- Made from the game's CooldownFrameTemplate, whose own swipe is a plain
+    -- color filling the whole frame (a bare Cooldown has none), so a look can
+    -- go back to it. The template pins itself to every edge of its parent;
+    -- its points are cleared before setting ours.
+    local okCd, cd = pcall(CreateFrame, "Cooldown", nil, b, "CooldownFrameTemplate")
+    b.cd = okCd and cd or CreateFrame("Cooldown", nil, b)
+    b.cd:ClearAllPoints()
+    -- 2 px in at the top and left, 3 at the right and 2.5 at the bottom, fitted
+    -- in game: an even 2 px overhung the frame there, 4 left a gap.
     b.cd:SetPoint("TOPLEFT", 2, -2)
-    b.cd:SetPoint("BOTTOMRIGHT", -2, 2)
-    pcall(b.cd.SetSwipeTexture, b.cd, SWIPE_FILE, 0, 0, 0, 0.75)
+    b.cd:SetPoint("BOTTOMRIGHT", -3, 2.5)
+    -- The template's color swipe, darker, as the game's own action buttons use
+    -- it. (The Cooldown Manager's swipe art left the left side of the icon
+    -- unswept on this client.) A bare Cooldown, which has no color swipe, gets
+    -- that art instead, since it draws nothing without a texture.
+    if okCd then
+        pcall(b.cd.SetSwipeColor, b.cd, 0, 0, 0, 0.75)
+        b.cd.fgSweep = "color"
+    else
+        pcall(b.cd.SetSwipeTexture, b.cd, SWIPE_FILE, 0, 0, 0, 0.75)
+        b.cd.fgSweep = SWIPE_FILE
+    end
     pcall(b.cd.SetDrawEdge, b.cd, false)
+    pcall(b.cd.SetDrawBling, b.cd, false)
     pcall(b.cd.SetHideCountdownNumbers, b.cd, true)
     b.cd:Hide()
     -- The seconds, on a layer above the swipe.
@@ -771,6 +793,7 @@ end
 
 local function BuildBar()
     bar = CreateFrame("Frame", "ForagerBar", UIParent)
+    ns.bar = bar
     bar:SetMovable(true)
     bar:SetClampedToScreen(true)
 
@@ -816,6 +839,7 @@ UpdateBar = function()
     if db.barHideCombat and (InCombatLockdown() or UnitAffectingCombat("player")) then show = false end
     if not show then
         if bar then bar:Hide() end
+        if ns.UpdateSparkles then ns.UpdateSparkles(nil) end
         return
     end
     if not bar then BuildBar() end
@@ -840,8 +864,14 @@ UpdateBar = function()
         local on = s.active == b.key
         if on ~= b.lit then
             b.lit = on
-            b.glow:SetShown(on)
-            if on then b.anim:Play() else b.anim:Stop() end
+            -- Forager_Skins.lua fades the glow in and out, and swaps in a round
+            -- one for round icons.
+            if ns.GlowChanged then
+                ns.GlowChanged(b, on)
+            else
+                b.glow:SetShown(on)
+                if on then b.anim:Play() else b.anim:Stop() end
+            end
         end
         -- Seconds to the next switch, and a swipe ticking down, on the icon
         -- that comes next.
@@ -860,6 +890,17 @@ UpdateBar = function()
         end
     end
 
+    -- Sparkles on the tracker that is on, while running and the option is on.
+    if ns.UpdateSparkles then
+        local active
+        if db.sparkles and db.enabled then
+            for i = 1, #entries do
+                if trackButtons[i].lit then active = trackButtons[i] end
+            end
+        end
+        ns.UpdateSparkles(active)
+    end
+
     -- Running: stop art pauses it. Paused: play art resumes it.
     local p = pauseButton
     p.icon:SetDesaturated(not db.enabled)
@@ -876,7 +917,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 800
+local W, CONTENT_H = 680, 870
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1258,6 +1299,58 @@ local function ShapeButton(parent, x, y)
     ns.shapeButton = b
 end
 
+-- Which sparkle effect plays round the active tracker: left-click for the
+-- next, right-click for the previous. Effects this client lacks are skipped.
+local function EffectButton(parent, x, y)
+    local b
+    b = PanelButton(parent, "", x, y, 100, function(_, mouse)
+        if not ns.SetSparkleEffect then return end
+        ns.SetSparkleEffect(nil, mouse == "RightButton" and -1 or 1)
+        RefreshOptions()
+        -- The tooltip names the new effect while the pointer stays on the button.
+        if GameTooltip and GameTooltip.IsOwned and GameTooltip:IsOwned(b) then b:GetScript("OnEnter")(b) end
+    end)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Sparkle effect", 1, 1, 1)
+        if ns.SparkleEffect then
+            local entry, index, count = ns.SparkleEffect()
+            GameTooltip:AddLine(("%d of %d: %s"):format(index, count, entry.label), 1, 0.82, 0, true)
+        end
+        GameTooltip:AddLine("The spell effect that plays round the tracker that is on. Effects this client lacks are skipped.", nil, nil, nil, true)
+        GameTooltip:AddLine("Left-click for the next effect, right-click for the previous one.", 0.6, 0.6, 0.6, true)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    optionRefreshers[#optionRefreshers + 1] = function()
+        if not ns.SparkleEffect then b:SetText("Effect") return end
+        local _, index, count = ns.SparkleEffect()
+        b:SetText(("Effect %d/%d"):format(index, count))
+    end
+    ns.effectButton = b
+end
+
+-- Sparkle size (how far out they reach) and intensity (how strong), each a
+-- percent, applied at once. Grayed while the sparkles are off.
+local function SparkleSliders(parent, x, y)
+    local function Apply() if ns.ApplySparkleLooks then ns.ApplySparkleLooks() end end
+    local size, sizeCaption, sizeValue = OptionSlider(parent, "Sparkle size", "sparkleSize", 50, 200, x, y, "%", 5, Apply)
+    local strength, strengthCaption, strengthValue = OptionSlider(parent, "Sparkle intensity", "sparkleIntensity", 0, 100, x, y - 44, "%", 5, Apply)
+    size.fgCaption, size.fgValue = sizeCaption, sizeValue
+    strength.fgCaption, strength.fgValue = strengthCaption, strengthValue
+    optionRefreshers[#optionRefreshers + 1] = function()
+        local on = db.sparkles and true or false
+        for _, slider in ipairs({ size, strength }) do
+            slider:SetEnabled(on)
+            slider:SetAlpha(on and 1 or 0.5)
+            slider.fgCaption:SetFontObject(on and GameFontHighlight or GameFontDisable)
+            slider.fgValue:SetFontObject(on and GameFontNormalSmall or GameFontDisable)
+        end
+    end
+    ns.sparkleSizeSlider, ns.sparkleIntensitySlider = size, strength
+end
+
 local function BuildContent()
     local c = CreateFrame("Frame")
     c:SetSize(W, CONTENT_H)
@@ -1295,40 +1388,43 @@ local function BuildContent()
     OptionCheck(c, "Show the seconds to the next switch", "barCountdown", RIGHT, -108, Refresh)
     OptionCheck(c, "Swipe down to the next switch", "barSwipe", RIGHT, -134, Refresh)
     OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -160, Refresh)
-    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -192, "%", 5, function() LayoutBar() end)
-    PanelButton(c, "Reset position", RIGHT, -238, 130, ResetBarPosition)
-    ShapeButton(c, RIGHT + 138, -238)
+    OptionCheck(c, "Sparkles on the active tracker", "sparkles", RIGHT, -186, function() Refresh() RefreshOptions() end)
+    EffectButton(c, RIGHT + 212, -186)
+    SparkleSliders(c, RIGHT, -218)
+    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -306, "%", 5, function() LayoutBar() end)
+    PanelButton(c, "Reset position", RIGHT, -352, 130, ResetBarPosition)
+    ShapeButton(c, RIGHT + 138, -352)
 
-    Header(c, "Minimap", RIGHT, -276)
-    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -302, function()
+    Header(c, "Minimap", RIGHT, -390)
+    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -416, function()
         UpdateMinimapButton()
         if not db.minimap then Print("minimap button hidden. /forager opens the options.") end
     end)
-    OptionCheck(c, "Show the current tracker on it", "minimapShowsTracker", RIGHT, -328, function() UpdateMinimapButton() end)
+    OptionCheck(c, "Show the current tracker on it", "minimapShowsTracker", RIGHT, -442, function() UpdateMinimapButton() end)
 
-    Header(c, "Swap for the situation", RIGHT, -366)
-    OptionCheck(c, "Fishing pole equipped: Find Fish", "swapFishing", RIGHT, -392)
-    OptionCheck(c, "Cat Form: Track Humanoids", "swapCatForm", RIGHT, -418)
-    OptionCheck(c, "Hunter in a battleground: Track Humanoids", "swapHunterPvP", RIGHT, -444)
+    Header(c, "Swap for the situation", RIGHT, -480)
+    OptionCheck(c, "Fishing pole equipped: Find Fish", "swapFishing", RIGHT, -506)
+    OptionCheck(c, "Cat Form: Track Humanoids", "swapCatForm", RIGHT, -532)
+    OptionCheck(c, "Hunter in a battleground: Track Humanoids", "swapHunterPvP", RIGHT, -558)
 
-    Header(c, "Keys", RIGHT, -482)
-    KeyCapture(c, RIGHT, -508)
+    Header(c, "Keys", RIGHT, -596)
+    KeyCapture(c, RIGHT, -622)
 
-    Header(c, "Status", RIGHT, -566)
+    Header(c, "Status", RIGHT, -680)
     local status = c:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    status:SetPoint("TOPLEFT", RIGHT + 4, -594)
+    status:SetPoint("TOPLEFT", RIGHT + 4, -708)
     status:SetWidth(COL - 20)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)
     optionRefreshers[#optionRefreshers + 1] = function() status:SetText(StatusText()) end
-    PanelButton(c, "Try the timer again", RIGHT, -678, 160, function()
+    PanelButton(c, "Try the timer again", RIGHT, -792, 160, function()
         db.method = nil
         silentFails = 0
         Log("method reset from options")
         RefreshOptions()
     end)
     local hint = c:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("TOPLEFT", RIGHT + 4, -712)
+    hint:SetPoint("TOPLEFT", RIGHT + 4, -826)
     hint:SetWidth(COL - 20)
     hint:SetJustifyH("LEFT")
     hint:SetText("More key bindings (switch to the next tracker, open these options): Options > Keybindings > AddOns > Forager. /forager opens this page.")
@@ -1376,6 +1472,12 @@ local function BuildWindow()
         { "ButtonFrameTemplate", "BasicFrameTemplateWithInset" })
     local top = template == "ButtonFrameTemplate" and -60 or -28
     f:SetSize(W, CONTENT_H - top + 10)
+    -- Taller than some screens: the whole window shrinks to fit, as the
+    -- Options page does.
+    local screen = UIParent.GetHeight and UIParent:GetHeight()
+    if type(screen) == "number" and screen > 0 then
+        f:SetScale(math.min(1, (screen - 40) / (CONTENT_H - top + 10)))
+    end
     f:SetPoint("CENTER")
     f:SetFrameStrata("DIALOG")
     f:SetToplevel(true)
@@ -1607,6 +1709,43 @@ SlashCmdList.FORAGER = function(msg)
     elseif cmd == "reset" then
         ResetBarPosition()
         Print("tracker icons moved back to the middle of the screen")
+    elseif cmd == "sparkles" and (arg:find("^size") or arg:find("^intensity")) then
+        -- /forager sparkles size <50-200>, intensity <0-100>
+        local what, value = arg:match("^(%a+)%s+(%S+)$")
+        local n = tonumber(value)
+        local key, low, high = "sparkleSize", 50, 200
+        if what == "intensity" then key, low, high = "sparkleIntensity", 0, 100 end
+        if not (what == "size" or what == "intensity") or not n or n ~= math.floor(n) or n < low or n > high then
+            Print("usage: /forager sparkles size <50-200> or /forager sparkles intensity <0-100>")
+            return
+        end
+        db[key] = n
+        if ns.ApplySparkleLooks then ns.ApplySparkleLooks() end
+        RefreshOptions()
+        Print("sparkle " .. what .. " " .. n .. "%")
+    elseif cmd == "sparkles" and arg ~= "" then
+        -- next, previous, or an effect's number: picks the sparkle effect.
+        if not ns.SetSparkleEffect then return end
+        local n = tonumber(arg)
+        local entry, index, count
+        if arg == "next" then entry, index, count = ns.SetSparkleEffect(nil, 1)
+        elseif arg == "prev" or arg == "previous" then entry, index, count = ns.SetSparkleEffect(nil, -1)
+        elseif n and n >= 1 and n <= #ns.SPARK_MODELS and n == math.floor(n) then entry, index, count = ns.SetSparkleEffect(n, 1)
+        else
+            Print("usage: /forager sparkles [next|previous|1-" .. #ns.SPARK_MODELS .. "]")
+            return
+        end
+        RefreshOptions()
+        if entry then
+            Print(("sparkle effect %d of %d: %s (%s, %d)"):format(index, count, entry.label, entry.name, entry.id))
+        else
+            Print("this client has none of the sparkle effects")
+        end
+    elseif cmd == "sparkles" then
+        db.sparkles = not db.sparkles
+        UpdateBar()
+        RefreshOptions()
+        Print("sparkles on the active tracker " .. (db.sparkles and "on" or "off"))
     elseif cmd == "minimap" or cmd == "icons" then
         local key = cmd == "minimap" and "minimap" or "bar"
         db[key] = not db[key]
@@ -1641,6 +1780,14 @@ SlashCmdList.FORAGER = function(msg)
         silentFails = 0
         Log("method reset by /forager retest")
         Print("trying the timer again")
+    elseif cmd == "debug" and arg == "icons" then
+        -- Printed, and kept in the saved log for reading after a /reload.
+        if not ns.ProbeIcons then return end
+        Log("icon probe, shape " .. tostring(db.iconShape) .. ", style " .. tostring(db.style))
+        ns.ProbeIcons(function(line)
+            Print(line)
+            Log(line)
+        end)
     elseif cmd == "debug" then
         local s = Scan()
         Print(StatusText():gsub("\n", " | "))
@@ -1656,6 +1803,21 @@ SlashCmdList.FORAGER = function(msg)
             .. (ns.IconShape and (" (" .. ns.IconShape() .. ")") or ""))
         for key, value in pairs(ns.report) do
             if key:find("^skin error") then Print(key .. ": " .. tostring(value)) end
+        end
+        if ns.SparklePath then
+            local path, why = ns.SparklePath()
+            Print("sparkles " .. (db.sparkles and "on" or "off") .. ": " .. path .. ", " .. why)
+        end
+        if ns.SparkleEffect then
+            local entry, index, count, status = ns.SparkleEffect()
+            local loaded, skipped = {}, {}
+            for i, e in ipairs(ns.SPARK_MODELS) do
+                if status[e.id] == "loaded" then loaded[#loaded + 1] = i .. " " .. e.label end
+                if status[e.id] == "skipped" then skipped[#skipped + 1] = i .. " " .. e.label .. " (" .. e.id .. ")" end
+            end
+            Print(("sparkle size %d%% (reach %.1f px), intensity %d%%"):format(db.sparkleSize, ns.SparkleReach and ns.SparkleReach() or 0, db.sparkleIntensity))
+            Print(("sparkle effect %d of %d: %s; loaded: %s; skipped: %s"):format(index, count, entry.label,
+                #loaded > 0 and table.concat(loaded, ", ") or "none yet", #skipped > 0 and table.concat(skipped, ", ") or "none"))
         end
     elseif cmd == "style" then
         local Styles = ns.Styles
@@ -1674,7 +1836,7 @@ SlashCmdList.FORAGER = function(msg)
         Print("icon shape: " .. (SHAPE_NAMES[db.iconShape] or SHAPE_NAMES.auto)
             .. (ns.IconShape and (", now " .. (looks[ns.IconShape()] or ns.IconShape())) or "") .. ".")
     else
-        Print("/forager (options), on, off, toggle, switch, delay <seconds>, move <tracker> up|down, icons, minimap, reset, style [auto|blizzard|dark], shape [auto|round|square], retest, debug")
+        Print("/forager (options), on, off, toggle, switch, delay <seconds>, move <tracker> up|down, icons, minimap, reset, style [auto|blizzard|dark], shape [auto|round|square], sparkles [next|previous|n|size n|intensity n], retest, debug [icons]")
     end
 end
 

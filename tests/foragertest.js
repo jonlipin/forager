@@ -6,6 +6,7 @@ const path = require('path');
 const { lua, lauxlib, lualib, to_luastring } = require('fengari');
 
 const STUBS = `
+math.randomseed(7) -- the sparkle tests use math.random; a fixed seed keeps the counts steady
 T = { anims = {}, now = 100, combat = false, blockTimer = false, blockAll = false, frames = {}, timers = {}, prints = {}, bindings = {} }
 T.tracking = {
   { name = "Find Herbs", spellID = 2383, type = "spell", active = false, texture = 1 },
@@ -99,6 +100,12 @@ function Frame:CreateAnimationGroup() local a = setmetatable({ scripts = {}, eve
 function Frame:CreateAnimation() return setmetatable({ scripts = {}, events = {} }, Frame) end
 function Frame:SetShown(on) self.shown = on end
 function Frame:Play() self.playing = true end
+function Frame:IsPlaying() return rawget(self, "playing") == true end
+function Frame:SetOffset(x, y) self.offset = { x, y } end
+function Frame:SetToAlpha(v) self.toAlpha = v end
+function Frame:SetFromAlpha(v) self.fromAlpha = v end
+function Frame:SetDegrees(d) self.degrees = d end
+function Frame:SetDrawLayer(layer, sub) self._layer, self._sub = layer, sub or 0 end
 function Frame:Stop() self.playing = false end
 function Frame:SetText(v) self.text = v end
 function Frame:CreateTexture() return setmetatable({ scripts = {}, events = {} }, Frame) end
@@ -149,20 +156,29 @@ function Frame:GetTexCoord()
   return l, t, l, b, r, t, r, b
 end
 function Frame:GetRegions() return unpack(rawget(self, "texs") or {}) end
-function Frame:ClearAllPoints() self._point, self._all = nil, nil end
+function Frame:ClearAllPoints() self._point, self._all, self._points = nil, nil, nil end
 function Frame:SetAllPoints(rel) self._all = rel or true end
-function Frame:SetSwipeTexture(tex, r, g, b, a) self.swipe = tex end
+function Frame:SetSwipeTexture(tex, r, g, b, a) self.swipe = tex self.swipeSet = true end
+function Frame:SetSwipeColor(r, g, b, a) self.swipeColor = { r, g, b, a } end
+function Frame:SetDrawSwipe(on) self.drawSwipe = on end
 function Frame:SetUseCircularEdge(on) self.circularEdge = on end
 function Frame:SetAtlas(atlas) self.atlas = atlas end
 function Frame:SetTexture(file) self.texture = file end
 function Frame:SetVertexColor(r, g, b, a) self.vertex = { r, g, b, a } end
-function Frame:SetPoint(...) self._point = { ... } end
+function Frame:SetBlendMode(mode) self.blend = mode end
+function Frame:EnableMouse(on) self.mouse = on end
+function Frame:SetPoint(...)
+  self._point = { ... }
+  local points = rawget(self, "_points") or {}
+  rawset(self, "_points", points)
+  points[(...)] = { ... }
+end
 function Frame:SetSize(w, h) self._w, self._h = w, h end
 T.strings = {}
 function Frame:CreateFontString() local fs = setmetatable({ scripts = {}, events = {} }, Frame) T.strings[#T.strings + 1] = fs return fs end
 function T.string(text) for _, fs in ipairs(T.strings) do if rawget(fs, "text") == text then return fs end end end
-function Frame:CreateTexture()
-  local t = setmetatable({ scripts = {}, events = {} }, Frame)
+function Frame:CreateTexture(_, layer, _, sub)
+  local t = setmetatable({ scripts = {}, events = {}, _layer = layer or "ARTWORK", _sub = sub or 0 }, Frame)
   local list = rawget(self, "texs") or {}
   rawset(self, "texs", list)
   list[#list + 1] = t
@@ -172,8 +188,34 @@ function T.texCount(f) local list = rawget(f, "texs") return list and #list or 0
 function T.drawSnapshot() local snap = {} for _, f in ipairs(T.frames) do snap[f] = T.texCount(f) end return snap end
 function T.drawnSince(snap, f) return T.texCount(f) - (snap[f] or 0) end
 GameFontNormalSmall, GameFontHighlight, GameFontDisable = { name = "GameFontNormalSmall" }, { name = "GameFontHighlight" }, { name = "GameFontDisable" }
+-- A ModelScene and its actors, as Cursor Beacon's harness has them: the camera
+-- is recorded, and an actor takes any model but the ones in T.modelDeny.
+-- T.noModelScene makes a client without the frame type.
+T.modelDeny = T.modelDeny or {}
+local function SceneActor()
+  local a = setmetatable({ scripts = {}, events = {} }, Frame)
+  rawset(a, "SetModelByFileID", function(self, id) if T.modelDeny[id] then return false end self.model = id return true end)
+  rawset(a, "SetPosition", function(self, x, y, z) self.pos = { x, y, z } end)
+  rawset(a, "SetAlpha", function(self, v) self.actorAlpha = v end)
+  rawset(a, "SetPitch", function(self, v) self.pitch = v end)
+  return a
+end
+local function AddSceneMethods(f)
+  f.cam = {}
+  f.actors = {}
+  rawset(f, "SetCameraPosition", function(self, x, y, z) self.cam.pos = { x, y, z } end)
+  rawset(f, "SetCameraFieldOfView", function(self, v) self.cam.fov = v end)
+  rawset(f, "SetCameraOrientationByAxisVectors", function(self, ...) self.cam.axes = { ... } end)
+  rawset(f, "CreateActor", function(self) local a = SceneActor() self.actors[#self.actors + 1] = a return a end)
+end
 function CreateFrame(kind, name, parent, template)
-  local f = setmetatable({ scripts = {}, events = {}, name = name, keyboard = false, propagate = false, parent = parent }, Frame)
+  if kind == "ModelScene" and T.noModelScene then error("Unknown frame type ModelScene") end
+  local f = setmetatable({ scripts = {}, events = {}, name = name, keyboard = false, propagate = false, parent = parent, kind = kind }, Frame)
+  if kind == "ModelScene" then AddSceneMethods(f) end
+  rawset(f, "template", template)
+  if template == "CooldownFrameTemplate" then rawset(f, "_all", parent) rawset(f, "swipeColor", { 0, 0, 0, 0.64 }) end
+  -- As the client does: a child starts one level above its parent.
+  if type(parent) == "table" and parent.GetFrameLevel then rawset(f, "level", parent:GetFrameLevel() + 1) end
   T.frames[#T.frames + 1] = f
   if name then _G[name] = f end
   -- The window template's own pieces, as real frames.
@@ -231,6 +273,20 @@ function T.advance(sec)
     for i = #T.timers, 1, -1 do if T.timers[i].at <= T.now then due[#due + 1] = table.remove(T.timers, i) end end
     for _, t in ipairs(due) do t.f() end
     if T.ticker then T.ticker() end
+    T.frame(0.25)
+  end
+end
+-- Frame updates without the clock moving: every shown frame's OnUpdate gets
+-- dt, in steps of at most 0.05 s, as the client's frames would.
+function T.frame(dt)
+  while dt > 1e-9 do
+    local step = math.min(0.05, dt)
+    dt = dt - step
+    local list = {}
+    for _, f in ipairs(T.frames) do
+      if rawget(f, "shown") ~= false and f.scripts.OnUpdate then list[#list + 1] = f end
+    end
+    for _, f in ipairs(list) do f.scripts.OnUpdate(f, step) end
   end
 end
 function T.active()
@@ -326,6 +382,9 @@ function run(name, body, opts) {
   const code = STUBS +
     (opts.db ? `ForagerDB = ${opts.db}\n` : '') +
     (opts.atlas ? `C_Texture = { GetAtlasInfo = function() return {} end }\nT.atlas = true\n` : '') +
+    // opts.noModelScene: a client without ModelScene; opts.modelDeny: model ids it lacks.
+    (opts.noModelScene ? `T.noModelScene = true\n` : '') +
+    (opts.modelDeny ? `T.modelDeny = ${opts.modelDeny}\n` : '') +
     (opts.page ? FIRST_OPEN_STUB : '') +
     (EUI_ON ? EUI_STUB : '') +
     `\nNS = {}\nlocal chunk = assert(load(${JSON.stringify(src)}, "@Forager.lua"))\nchunk("Forager", NS)\n` +
@@ -398,9 +457,9 @@ run('slash delay', `
 `);
 run('tracker icons glow on the active tracker and pause resumes', `
   T.advance(6.5) check(T.active() == "Find Herbs", "herbs on")
-  local glows = {}
-  for _, f in ipairs(T.anims) do if true then glows[#glows + 1] = f end end
-  check(#glows == 2, "two glow animations, got " .. #glows)
+  -- The glows' own animations (the sparkles have animations of their own).
+  local glows = { ForagerTrackButton1.anim, ForagerTrackButton2.anim }
+  check(#NS.trackButtons == 2 and rawget(ForagerTrackButton1, "anim") and rawget(ForagerTrackButton2, "anim"), "two glow animations")
   check(glows[1].playing == true and glows[2].playing == false, "herbs glows")
   T.advance(6.5) check(glows[1].playing == false and glows[2].playing == true, "minerals glows")
   ForagerPauseButton.scripts.OnClick(ForagerPauseButton, "LeftButton")
@@ -641,6 +700,24 @@ function ICONS(look, drawer, pause) {
       return true
     end
     local function Masks(icon) return rawget(icon, "masks") or {} end
+    -- The sweep art this addon uses: its clear margin on each side and how many texels
+    -- its solid part has across (measured from the files). A sweep follows its texels,
+    -- so one with fewer texels than the icon has pixels steps visibly (WHITE8X8 drew a
+    -- pie stepped in eighths and left a strip unswept).
+    local ART = {
+      [SWIPE_FILE] = { clear = 6 / 128, texels = 116 },
+      [CIRCLE_FILE] = { clear = 0, texels = 128 },
+      [FLAT] = { clear = 0, texels = 8 },
+    }
+    -- The only texture files a sweep may use: standalone images, decoded and checked
+    -- (an atlas name, or a sheet holding other images, would stretch the whole sheet).
+    local STANDALONE = { [SWIPE_FILE] = true, [CIRCLE_FILE] = true }
+    local function SweepArt(cd, name)
+      check(rawget(cd, "template") == "CooldownFrameTemplate", name .. " sweep made from CooldownFrameTemplate")
+      local tex = rawget(cd, "swipe")
+      check(tex == nil or STANDALONE[tex], name .. " sweep texture is a standalone image: " .. tostring(tex))
+      check(rawget(cd, "drawSwipe") ~= false, name .. " sweep drawn")
+    end
     local function Hidden(list, what, name)
       for _, piece in ipairs(list or {}) do check(rawget(piece, "alpha") == 0, name .. " " .. what .. " hidden") end
     end
@@ -666,7 +743,17 @@ function ICONS(look, drawer, pause) {
         else
           check(not T.darkCalls[icon] and not (T.skinned and T.skinned[icon]), name .. " never restyled")
         end
-        if cd then check(rawget(cd, "swipe") == SWIPE_FILE and rawget(cd, "_all") == nil and not rawget(cd, "circularEdge"), name .. " Cooldown Manager sweep inside the frame") end
+        if cd then
+          SweepArt(cd, name)
+          local pts = rawget(cd, "_points") or {}
+          -- The Cooldown's own color swipe, as the game's action buttons use it: the
+          -- Cooldown Manager's swipe art left the left side unswept on this client.
+          local c = rawget(cd, "swipeColor") or {}
+          check(rawget(cd, "swipe") == nil and rawget(cd, "_all") == nil and not rawget(cd, "circularEdge"), name .. " no swipe texture on the action bar look: " .. tostring(rawget(cd, "swipe")))
+          check(c[1] == 0 and c[2] == 0 and c[3] == 0 and c[4] == 0.75 and rawget(cd, "fgSweep") == "color", name .. " a black color swipe at 0.75, noted as color")
+          check(pts.TOPLEFT and pts.TOPLEFT[2] == 2 and pts.TOPLEFT[3] == -2 and pts.BOTTOMRIGHT and pts.BOTTOMRIGHT[2] == -3 and pts.BOTTOMRIGHT[3] == 2.5
+            and pts.CENTER == nil, name .. " the bar look's own inset, 2 px top and left, 3 right, 2.5 bottom")
+        end
       elseif look == "square" then
         check(#masks == 0 and square, name .. " square, no mask")
         Art(0)
@@ -680,7 +767,17 @@ function ICONS(look, drawer, pause) {
           check(#square.added == 5, name .. " edge and flat highlight added: " .. #square.added)
         end
         for _, piece in ipairs(square.added) do check(rawget(piece, "alpha") == 1, name .. " square edge shown") end
-        if cd then check(rawget(cd, "swipe") == FLAT and rawget(cd, "_all") == icon and not rawget(cd, "circularEdge"), name .. " sweep square, over the icon") end
+        if cd then
+          SweepArt(cd, name)
+          check(not rawget(cd, "circularEdge") and (rawget(cd, "_points") or {}).CENTER == nil, name .. " no circle settings on a square")
+          -- The Cooldown's own color swipe fills its frame whatever its size, and the
+          -- frame is the icon exactly: no texture at all, so nothing can stretch.
+          check(rawget(cd, "_all") == icon and rawget(cd, "_points") == nil, name .. " the sweep frame is the icon, all four edges")
+          check(rawget(cd, "swipeSet") and rawget(cd, "swipe") == nil, name .. " no swipe texture on the square look: " .. tostring(rawget(cd, "swipe")))
+          local c = rawget(cd, "swipeColor") or {}
+          check(c[1] == 0 and c[2] == 0 and c[3] == 0 and c[4] == 0.75, name .. " a black color swipe at 0.75")
+          check(rawget(cd, "fgSweep") == "color", name .. " noted for debug: " .. tostring(rawget(cd, "fgSweep")))
+        end
       else
         local ringed = look == "circle-ring"
         check(circle and #masks == 1 and masks[1] == circle.mask, name .. " the circle mask only, " .. #masks .. " masks")
@@ -691,37 +788,244 @@ function ICONS(look, drawer, pause) {
         local d = ringed and circle.ringSize or 36
         check(rawget(circle.mask, "_w") == d and rawget(circle.mask, "_h") == d, name .. " circle " .. d .. " across, got " .. tostring(rawget(circle.mask, "_w")))
         check(rawget(circle.ring, "texture") == RING_FILE and rawget(circle.ring, "alpha") == (ringed and 1 or 0), name .. " minimap ring " .. (ringed and "shown" or "hidden"))
-        check(rawget(circle.edge, "texture") == CIRCLE_FILE and rawget(circle.edge, "alpha") == (ringed and 0 or 1), name .. " dark edge " .. (ringed and "hidden" or "shown"))
+        check(rawget(circle.edge, "alpha") == (ringed and 0 or 1), name .. " dark edge " .. (ringed and "hidden" or "shown"))
         -- The ring texture is 64 across with its circle off centre: scaled by 36/32, its
         -- centre (20.05, 18.92) lands on the icon's.
         local rp = rawget(circle.ring, "_point")
         check(rawget(circle.ring, "_w") == 72 and rp[1] == "TOPLEFT" and rp[2] == icon and rp[3] == "CENTER"
           and math.abs(rp[4] + 22.56) < 0.01 and math.abs(rp[5] - 21.29) < 0.01, name .. " ring centred on the icon")
         check(circle.ringSize == 30, name .. " picture 30 across inside the ring, got " .. tostring(circle.ringSize))
-        check(Same(rawget(circle.edge, "vertex"), { 0, 0, 0, 1 }) and rawget(circle.edge, "_w") == 38, name .. " dark edge one pixel past the circle")
-        check(rawget(circle.hl, "alpha") == 1 and rawget(circle.hl, "_w") == d and rawget(circle.hl, "texture") == CIRCLE_FILE, name .. " round highlight")
-        check(rawget(circle.press, "alpha") == 0, name .. " press art waits for a press")
+        -- Flat colors under circle masks: the alpha is the color's own, with plain blending.
+        local function Under(tex, mask) for _, m in ipairs(Masks(tex)) do if m == mask then return true end end return false end
+        local ec, hc, pc = rawget(circle.edge, "color"), rawget(circle.hl, "color"), rawget(circle.press, "color")
+        check(ec and Same(ec, { 0, 0, 0, 1 }) and rawget(circle.edge, "blend") == "BLEND", name .. " dark edge a black disc")
+        check(Under(circle.edge, circle.edgeMask) and rawget(circle.edgeMask, "_w") == 38 and rawget(circle.edge, "_w") == 38, name .. " dark edge one pixel past the circle")
+        check(rawget(circle.hl, "texture") == nil and rawget(circle.hl, "vertex") == nil, name .. " highlight is not a tinted circle texture")
+        check(hc and hc[1] == 1 and hc[4] <= 0.2 and rawget(circle.hl, "blend") == "BLEND", name .. " highlight a faint lightening: " .. tostring(hc and hc[4]))
+        check(Under(circle.hl, circle.mask) and rawget(circle.hl, "alpha") == 1, name .. " round highlight, in the picture's circle")
+        check(pc and pc[1] == 0 and pc[4] <= 0.35 and rawget(circle.press, "blend") == "BLEND", name .. " press a faint darkening: " .. tostring(pc and pc[4]))
+        check(Under(circle.press, circle.mask) and rawget(circle.press, "alpha") == 0, name .. " press art waits for a press")
         if cd then
+          SweepArt(cd, name)
           check(rawget(cd, "swipe") == CIRCLE_FILE and rawget(cd, "circularEdge") == true, name .. " circular sweep")
-          check(rawget(cd, "_all") == nil and rawget(cd, "_w") == d, name .. " sweep the size of the circle")
+          local pts = rawget(cd, "_points") or {}
+          check(rawget(cd, "_all") == nil and rawget(cd, "_w") == d and pts.CENTER and pts.CENTER[2] == icon and pts.CENTER[3] == "CENTER"
+            and pts.TOPLEFT == nil and pts.BOTTOMRIGHT == nil, name .. " sweep the size of the circle, on its center")
         end
       end
       local glow = rawget(b, "glow")
-      if glow then check(rawget(glow, "alpha") == nil, name .. " glow kept") end
+      if glow then
+        check(rawget(glow, "alpha") == nil, name .. " shimmer's own alpha left to its animation")
+        local roundGlow = circle and circle.glow
+        local lit = rawget(b, "lit") and true or false
+        local vertex = rawget(glow, "vertex")
+        if look:sub(1, 6) == "circle" and T.atlas then
+          check(roundGlow and rawget(roundGlow, "atlas") == "dragonflight-landingbutton-circleglow", name .. " round glow from the client's circle glow")
+          -- Its bright band (0.413 of its width) 2 px outside the gold (18) or the edge (19).
+          local across = look == "circle-ring" and 48 or 51
+          check(rawget(roundGlow, "_w") == across and rawget(roundGlow, "_h") == across, name .. " round glow " .. across .. " across, got " .. tostring(rawget(roundGlow, "_w")))
+          -- The ring in the art sits at 0.5001, 0.4898 of it, so the art moves to put that on the icon's center.
+          local gp = rawget(roundGlow, "_point")
+          check(gp and gp[1] == "CENTER" and gp[2] == icon and gp[3] == "CENTER"
+            and math.abs(gp[4] - (0.5 - 0.5001) * across) < 0.001 and math.abs(gp[5] - (0.4898 - 0.5) * across) < 0.001,
+            name .. " round glow's ring on the icon's center: " .. tostring(gp and gp[4]) .. ", " .. tostring(gp and gp[5]))
+          -- Settled: shown, pulsing and at full alpha on the tracker that is on; faded out and stopped elsewhere.
+          local rv = rawget(roundGlow, "vertex") or {}
+          check(rawget(roundGlow, "shown") == lit and rawget(circle.glowAnim, "playing") == lit and rv[4] == (lit and 1 or 0),
+            name .. " round glow " .. (lit and "on" or "off") .. " with the tracker")
+          check(vertex and vertex[4] == 0 and not rawget(glow, "shown"), name .. " square shimmer faded out under the round glow")
+        else
+          if roundGlow then check(not rawget(roundGlow, "shown") and not rawget(circle.glowAnim, "playing"), name .. " round glow off outside Round") end
+          check(vertex and vertex[4] == (lit and 1 or 0) and (rawget(glow, "shown") or false) == lit,
+            name .. " square shimmer " .. (lit and "shown" or "faded out") .. " with the tracker")
+        end
+      end
     end
     check(#NS.trackButtons >= 2, "tracker icons built: " .. #NS.trackButtons)
     for _, b in ipairs(NS.trackButtons) do Icon(b, "${look}") end
     Icon(ForagerPauseButton, "${pause}")
+    -- The play and stop symbols stay readable on top, whatever the look.
+    local p = ForagerPauseButton
+    check(rawget(p.play, "alpha") ~= 0 and rawget(p.stop, "alpha") ~= 0, "pause symbols not faded")
+    if "${pause}" == "circle-ring" then
+      check(rawget(p.fgCircle, "ringSize") >= 36 * 26 / 42, "the stop symbol fits inside the ring")
+    end
     -- The tracker that is on still glows, and the next one still sweeps.
     local lit, sweeping = 0, 0
     for _, b in ipairs(NS.trackButtons) do
-      if rawget(b, "lit") then lit = lit + 1 check(b.glow.shown and b.anim.playing, "glow on the tracker that is on") end
+      if rawget(b, "lit") then
+        lit = lit + 1
+        local c = rawget(b, "fgCircle")
+        local roundOn = c and c.glow and rawget(c.glow, "shown")
+        check((b.glow.shown and b.anim.playing) or (roundOn and rawget(c.glowAnim, "playing")), "glow on the tracker that is on")
+      end
       if rawget(b.cd, "shown") then sweeping = sweeping + 1 end
     end
     check(lit == 1 and sweeping == 1, "one glowing, one sweeping: " .. lit .. ", " .. sweeping)
   end
 `;
 }
+// Sparkles: forty ticks of the bar (time standing still, so the tracker does
+// not change), finishing each spark after its tick so the pool never runs
+// dry. Only tracker `active` may have sparks out; each starts on `look`'s
+// border, drifts 4 to 8 px straight out, in star4 with ADD blending, in the
+// same layer as the border art and just below it.
+const SPARK_HELPERS = `
+  function T.sparksOut(b) local n = 0 for _, s in ipairs(rawget(b, "fgSparks") or {}) do if rawget(s.anim, "playing") then n = n + 1 end end return n end
+  function T.finishSparks()
+    for _, b in ipairs(NS.trackButtons) do
+      for _, s in ipairs(rawget(b, "fgSparks") or {}) do
+        if rawget(s.anim, "playing") then s.anim.playing = false local f = s.anim.scripts.OnFinished if f then f(s.anim) end end
+      end
+    end
+  end
+  function T.sparkTicks(n, watch)
+    local launched = 0
+    for _ = 1, n do
+      T.ticker()
+      for _, b in ipairs(NS.trackButtons) do
+        if T.sparksOut(b) > 0 then
+          if watch then watch(b) end
+          launched = launched + T.sparksOut(b)
+        end
+      end
+      T.finishSparks()
+    end
+    return launched
+  end
+`;
+function SPARKS(look, active) {
+  return SPARK_HELPERS + `
+  do
+    local look, active = "${look}", ForagerTrackButton${active}
+    local icon = active.icon
+    local circle, square = rawget(active, "fgCircle"), rawget(active, "fgSquare")
+    local borders = {}
+    if look == "bar" then borders = { rawget(active, "fgFrame") }
+    elseif look == "circle-ring" then borders = { circle.ring }
+    elseif look == "circle-edge" then borders = { circle.edge }
+    else for _, piece in ipairs(square.added) do if rawget(piece, "_layer") ~= "HIGHLIGHT" then borders[#borders + 1] = piece end end end
+    check(#borders >= 1, look .. ": found the border art")
+    local starts = 0
+    local launched = T.sparkTicks(40, function(b)
+      check(b == active, "only the active tracker sparkles, not " .. tostring(rawget(b, "name")))
+      for _, s in ipairs(b.fgSparks) do
+        if rawget(s.anim, "playing") then
+          starts = starts + 1
+          local tex, p, o = s.tex, rawget(s.tex, "_point"), rawget(s.move, "offset")
+          local art = T.atlas and rawget(tex, "atlas") == "bonusobjectives-bar-starburst"
+            or not T.atlas and rawget(tex, "texture") == "Interface\\\\Cooldown\\\\star4"
+          local v = rawget(tex, "vertex") or {}
+          check(art and rawget(tex, "blend") == "ADD" and v[1] == 1 and v[2] == 0.82 and v[3] == 0.35,
+            "a gold star, added: " .. tostring(rawget(tex, "atlas") or rawget(tex, "texture")))
+          check(p[1] == "CENTER" and p[2] == icon and p[3] == "CENTER", "placed from the icon's center")
+          local x, y, ox, oy = p[4], p[5], o[1], o[2]
+          local drift = math.sqrt(ox * ox + oy * oy)
+          check(drift >= 4 - 1e-6 and drift <= 8 + 1e-6, "drifts 4 to 8 px, got " .. drift)
+          if look:sub(1, 6) == "circle" then
+            local r = math.sqrt(x * x + y * y)
+            local want = look == "circle-ring" and 18 or 19
+            check(math.abs(r - want) < 1e-6, look .. ": starts on the rim (" .. want .. "), got " .. r)
+            check(math.abs(ox * y - oy * x) < 1e-6 and ox * x + oy * y > 0, look .. ": drifts straight out from the center")
+          else
+            check(math.abs(math.max(math.abs(x), math.abs(y)) - 18) < 1e-6, look .. ": starts on the square's edge")
+            if math.abs(math.abs(y) - 18) < 1e-6 and math.abs(x) < 18 then
+              check(math.abs(ox) < 1e-6 and oy * y > 0, look .. ": out across the top or bottom")
+            else
+              check(math.abs(oy) < 1e-6 and ox * x > 0, look .. ": out across a side")
+            end
+          end
+          for _, border in ipairs(borders) do
+            check(rawget(tex, "_layer") == rawget(border, "_layer") and rawget(tex, "_sub") < rawget(border, "_sub"),
+              look .. ": just behind the border art, " .. tostring(rawget(tex, "_layer")) .. " " .. tostring(rawget(tex, "_sub"))
+              .. " under " .. tostring(rawget(border, "_layer")) .. " " .. tostring(rawget(border, "_sub")))
+          end
+        end
+      end
+    end)
+    check(launched >= 5 and launched <= 40, "a few at a time: " .. launched .. " in 40 ticks")
+    check(#active.fgSparks == 6, "six sparks in the pool")
+  end
+`;
+}
+// The glitter model, settled (frames run past the fade first): at most two
+// ModelScenes, parented to the bar at the bar's own level so every icon (one
+// above) draws in front; the one on tracker `active` is shown at full (actor
+// 0.75, scene 1); any other is faded out and hidden. Each is 104 across with
+// the camera placing the glitter just past the ring, one actor at its center
+// carrying model `id`; and no drawn sparkles anywhere.
+const SCENES = `
+  function T.scenes()
+    local list = {}
+    for _, f in ipairs(T.frames) do if rawget(f, "kind") == "ModelScene" then list[#list + 1] = f end end
+    return list
+  end
+`;
+function MODEL(active, id) {
+  return SCENES + `
+  T.frame(0.6)
+  do
+    local scenes = T.scenes()
+    check(#scenes >= 1 and #scenes <= 2, "one or two model scenes, never more: " .. #scenes)
+    local b = ForagerTrackButton${active}
+    local want
+    for _, e in ipairs(NS.SPARK_MODELS) do if e.id == ${id} then want = e end end
+    check(want ~= nil, "model ${id} is one of the effects")
+    local on = 0
+    for _, scene in ipairs(scenes) do
+      local p = rawget(scene, "_point")
+      local actor = scene.actors[1]
+      if rawget(scene, "shown") then
+        on = on + 1
+        check(p and p[1] == "CENTER" and p[2] == b.icon and p[3] == "CENTER", "the glitter shown is on tracker ${active}")
+        -- Fully faded in: the effect's own strength times the Sparkle intensity.
+        local full = want.alpha * ForagerDB.sparkleIntensity / 100
+        check(math.abs(actor.actorAlpha - full) < 1e-9 and math.abs((rawget(scene, "alpha") or 0) - (full > 0 and 1 or 0)) < 1e-6,
+          "fully faded in: " .. tostring(actor.actorAlpha) .. " of " .. full)
+      else
+        check(actor.actorAlpha == 0 and (rawget(scene, "alpha") or 0) == 0, "a hidden scene is fully faded out")
+      end
+      check(rawget(scene, "parent") == ForagerBar and scene:GetFrameLevel() == ForagerBar:GetFrameLevel(), "at the bar's own level")
+      for _, button in ipairs(NS.trackButtons) do
+        check(scene:GetFrameLevel() < button:GetFrameLevel(), "behind " .. rawget(button, "name"))
+      end
+      check(scene:GetFrameLevel() < ForagerPauseButton:GetFrameLevel(), "behind the pause button")
+      check(rawget(scene, "mouse") == false, "never takes the mouse")
+      local cam = scene.cam
+      check(cam.pos and cam.pos[2] == 0 and cam.pos[3] == 0 and cam.fov == 0.6, "camera placed straight on")
+      -- Where the effect's spread lands on screen: the scene shows tan(fov / 2) * distance
+      -- yards from its center to its edge. A hidden scene may still carry the last effect.
+      local w, h = rawget(scene, "_w"), rawget(scene, "_h")
+      -- The reach is 31 px at Sparkle size 100%; the scene grows to stay 12 px past it.
+      local wantReach = 31 * ForagerDB.sparkleSize / 100
+      local wantScene = math.max(104, math.ceil(2 * (wantReach + 12)))
+      check(w == wantScene and h == wantScene, "the scene is " .. wantScene .. " across, got " .. tostring(w))
+      local yards = want.yards
+      if not rawget(scene, "shown") then for _, e in ipairs(NS.SPARK_MODELS) do if e.id == actor.model then yards = e.yards end end end
+      local reach = yards * (h / 2) / (math.tan(cam.fov / 2) * cam.pos[1])
+      check(math.abs(reach - wantReach) < 1e-6, "the glitter reaches " .. wantReach .. " px, got " .. reach)
+      check(h / 2 >= reach + 12, "the scene's edge is well clear of the glitter")
+      check(#scene.actors == 1, "one actor")
+      if rawget(scene, "shown") then check(actor.model == ${id}, "model ${id}, got " .. tostring(actor.model)) end
+      check(actor.pos and actor.pos[1] == 0 and actor.pos[2] == 0 and actor.pos[3] == 0, "at the center")
+    end
+    check(on == 1, "exactly one glitter shown: " .. on)
+    for _, button in ipairs(NS.trackButtons) do
+      check(rawget(button, "fgSparks") == nil, "no drawn sparkles alongside the model")
+    end
+    check(NS.SparklePath() == "model", "the model is the path in use")
+  end
+`;
+}
+// Settled after the fade: every scene hidden and faded out.
+const MODEL_OFF = SCENES + `
+  T.frame(0.6)
+  do
+    for _, scene in ipairs(T.scenes()) do
+      check(rawget(scene, "shown") == false and scene.actors[1].actorAlpha == 0, "the glitter faded out and hidden")
+    end
+  end
+`;
 const WINDOW_DRAWN = `
   do
     local win = ForagerOptions
@@ -823,7 +1127,14 @@ if (!EUI_ON) {
     SNAP = T.drawSnapshot()
     T.advance(6.5)
     check(T.active() == "Find Minerals", "the rotation goes on")
-    for _, b in ipairs(NS.trackButtons) do check(T.drawnSince(SNAP, b) == 0, rawget(b, "name") .. " not drawn on twice") end
+    for _, b in ipairs(NS.trackButtons) do
+      -- The sparkles' own textures come with the first time a tracker is on.
+      local isSpark = {}
+      for _, spark in ipairs(rawget(b, "fgSparks") or {}) do isSpark[spark.tex] = true end
+      local texs, new = rawget(b, "texs") or {}, 0
+      for i = (SNAP[b] or 0) + 1, #texs do if not isSpark[texs[i]] then new = new + 1 end end
+      check(new == 0, rawget(b, "name") .. " not drawn on twice")
+    end
   ` + ICONS('square'), { atlas: true, db: '{ style = "dark" }' });
   run('icon shape: Square under Blizzard and back to Round, live', `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -834,7 +1145,7 @@ if (!EUI_ON) {
   ` + ICONS('bar') + `
     shape.scripts.OnClick(shape, "LeftButton")
     check(ForagerDB.iconShape == "round" and rawget(shape, "text") == "Icon shape: Round", "left-click: Round")
-  ` + ICONS('circle-ring', 'dark', 'bar') + `
+  ` + ICONS('circle-ring') + `
     shape.scripts.OnClick(shape, "LeftButton")
     check(ForagerDB.iconShape == "square" and rawget(shape, "text") == "Icon shape: Square", "left-click again: Square")
     check(NS.Styles.Applied() == nil, "still the Blizzard style")
@@ -846,7 +1157,7 @@ if (!EUI_ON) {
   ` + ICONS('square', 'dark', 'bar') + `
     shape.scripts.OnClick(shape, "RightButton")
     check(ForagerDB.iconShape == "round", "right-click: back to Round")
-  ` + ICONS('circle-ring', 'dark', 'bar') + `
+  ` + ICONS('circle-ring') + `
     SlashCmdList.FORAGER("shape square")
   ` + ICONS('square', 'dark', 'bar') + `
     SlashCmdList.FORAGER("shape auto")
@@ -862,11 +1173,11 @@ if (!EUI_ON) {
     check(rawget(b.fgCircle.press, "alpha") == 0, "no round press art on a square icon")
     b.scripts.OnMouseUp(b, "LeftButton")
     SlashCmdList.FORAGER("shape round")
-  ` + ICONS('circle-ring', 'dark', 'bar') + `
+  ` + ICONS('circle-ring') + `
     local n, errs = T.skinErrors()
     check(n == 0, "no skin errors: " .. errs)
   `, { atlas: true });
-  run('icon shape: Round under Dark, live; the pause button stays square', `
+  run('icon shape: Round under Dark, live, the pause button round with the trackers', `
     T.fire("PLAYER_ENTERING_WORLD")
     T.advance(6.5)
   ` + OPEN + ICONS('square') + `
@@ -874,11 +1185,11 @@ if (!EUI_ON) {
     shape.scripts.OnClick(shape, "LeftButton")
     check(ForagerDB.iconShape == "round", "Round chosen")
     check(NS.Styles.Applied() == "dark", "still Dark")
-  ` + ICONS('circle-edge', 'dark', 'square') + `
+  ` + ICONS('circle-edge') + `
     ForagerDB.rotation[1494] = true
     T.advance(1)
     check(ForagerTrackButton3 ~= nil and rawget(ForagerTrackButton3, "fgShape") == "circle-edge", "an icon built later comes round")
-  ` + ICONS('circle-edge', 'dark', 'square') + `
+  ` + ICONS('circle-edge') + `
     shape.scripts.OnClick(shape, "LeftButton")
     check(ForagerDB.iconShape == "square", "Square chosen")
   ` + ICONS('square') + `
@@ -888,11 +1199,11 @@ if (!EUI_ON) {
     local n, errs = T.skinErrors()
     check(n == 0, "no skin errors: " .. errs)
   `, { atlas: true, db: '{ style = "dark" }' });
-  run('icon shape: Round saved under Dark; the pause button is still squared at login', `
+  run('icon shape: Round saved under Dark: trackers and the pause button round at login', `
     T.fire("PLAYER_ENTERING_WORLD")
     T.advance(6.5)
     check(NS.Styles.Applied() == "dark", "Dark")
-  ` + ICONS('circle-edge', 'dark', 'square'), { atlas: true, db: '{ style = "dark", iconShape = "round" }' });
+  ` + ICONS('circle-edge'), { atlas: true, db: '{ style = "dark", iconShape = "round" }' });
   run('a failed icon shape lands in the saved log', `
     T.advance(6.5)
     local real = Frame.SetTexCoord
@@ -907,11 +1218,445 @@ if (!EUI_ON) {
     T.fire("PLAYER_ENTERING_WORLD")
     T.advance(6.5)
     SlashCmdList.FORAGER("shape round")
-  ` + ICONS('circle-ring', 'dark', 'bar') + `
+  ` + ICONS('circle-ring') + `
     SlashCmdList.FORAGER("style dark")
-  ` + ICONS('circle-edge', 'dark', 'square') + `
+  ` + ICONS('circle-edge') + `
     local n, errs = T.skinErrors()
     check(n == 0, "no skin errors: " .. errs)
+  `, { atlas: true });
+  run('icon shape: the round glow moves to the tracker that comes on', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    SlashCmdList.FORAGER("shape round")
+    T.advance(6.5)
+    check(T.active() == "Find Herbs", "herbs on")
+  ` + ICONS('circle-ring') + `
+    check(rawget(ForagerTrackButton1.fgCircle.glow, "shown") == true, "herbs glows round")
+    T.advance(6.5)
+    check(T.active() == "Find Minerals", "minerals on")
+  ` + ICONS('circle-ring') + `
+    check(rawget(ForagerTrackButton2.fgCircle.glow, "shown") == true and rawget(ForagerTrackButton1.fgCircle.glow, "shown") == false, "the round glow moved to minerals")
+    SlashCmdList.FORAGER("shape auto")
+  ` + ICONS('bar') + `
+    check(rawget(ForagerTrackButton2.glow, "shown") == true and rawget(ForagerTrackButton2.glow, "vertex")[4] == 1, "the shimmer back on minerals")
+  `, { atlas: true });
+  run('sparkles: a real glitter model behind the active tracker, and debug says so', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    check(NS.SparklePath() == "not started", "nothing made at login")
+    T.advance(6.5)
+    check(T.active() == "Find Herbs", "herbs on")
+  ` + MODEL(1, 166336) + `
+    SlashCmdList.FORAGER("debug")
+    local seen = false
+    for _, m in ipairs(T.prints) do if m:find("sparkles on: model, spells/holy_precast_low_hand.m2 (166336)", 1, true) then seen = true end end
+    check(seen, "debug names the model")
+    local before = #T.prints
+    SlashCmdList.FORAGER("debug icons")
+    check(T.prints[before + 1]:find("glitter 1 (spells/holy_precast_low_hand.m2)", 1, true), "debug icons shows it: " .. T.prints[before + 1])
+  `, { atlas: true });
+  run('sparkles: the glitter model follows the active tracker', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + MODEL(1, 166336) + `
+    T.advance(6.5)
+    check(T.active() == "Find Minerals", "minerals on")
+  ` + MODEL(2, 166336), { atlas: true });
+  run('sparkles: the glitter model stops when paused, hidden, hidden in combat, or switched off', OPEN + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + MODEL(1, 166336) + `
+    SlashCmdList.FORAGER("off")
+  ` + MODEL_OFF + `
+    SlashCmdList.FORAGER("on")
+  ` + MODEL(1, 166336) + `
+    SlashCmdList.FORAGER("sparkles")
+    check(ForagerDB.sparkles == false, "the command turns them off")
+  ` + MODEL_OFF + `
+    local box
+    for _, f in ipairs(T.frames) do local l = rawget(f, "label") if type(l) == "table" and rawget(l, "text") == "Sparkles on the active tracker" then box = f end end
+    box.checked = true box.scripts.OnClick(box)
+    check(ForagerDB.sparkles == true, "the option turns them on")
+  ` + MODEL(1, 166336) + `
+    SlashCmdList.FORAGER("icons")
+  ` + MODEL_OFF + `
+    SlashCmdList.FORAGER("icons")
+    ForagerDB.barHideCombat = true
+    T.combat = true
+    T.ticker()
+  ` + MODEL_OFF + `
+    T.combat = false
+    T.ticker()
+  ` + MODEL(1, 166336), { atlas: true });
+  run('sparkles: the glitter model in every shape and style', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    SlashCmdList.FORAGER("shape round")
+  ` + MODEL(1, 166336) + `
+    SlashCmdList.FORAGER("shape square")
+  ` + MODEL(1, 166336) + `
+    SlashCmdList.FORAGER("style dark")
+    SlashCmdList.FORAGER("shape round")
+  ` + MODEL(1, 166336) + `
+    SlashCmdList.FORAGER("shape auto")
+  ` + MODEL(1, 166336) + `
+    local n, errs = T.skinErrors()
+    check(n == 0, "no skin errors: " .. errs)
+  `, { atlas: true });
+  // Steps the clock a quarter second at a time until the tracker changes; the
+  // fades are then 0.25 s into their 0.4 s.
+  const TO_NEXT = `
+    local was = T.active()
+    for _ = 1, 40 do T.advance(0.25) if T.active() ~= was then break end end
+    check(T.active() ~= was, "the next tracker came on")
+  `;
+  // The four marks on a tracker: its glitter scene, shimmer, round glow (if any).
+  const FADE_HELPERS = SCENES + `
+    function T.sceneOn(button)
+      for _, scene in ipairs(T.scenes()) do
+        local p = rawget(scene, "_point")
+        if rawget(scene, "shown") and p and p[2] == button.icon then return scene end
+      end
+    end
+    function T.va(tex) local v = rawget(tex, "vertex") return v and v[4] end
+  `;
+  run('crossfade: on a tracker change the glitter and the shimmer fade out on the old while they fade in on the new', FADE_HELPERS + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + MODEL(1, 166336) + TO_NEXT + `
+    local old, new = T.sceneOn(ForagerTrackButton1), T.sceneOn(ForagerTrackButton2)
+    check(old and new and old ~= new, "both glitters showing mid-fade, on their own trackers")
+    local oa, na = old.actors[1].actorAlpha, new.actors[1].actorAlpha
+    check(oa > 0 and oa < 0.75 and na > 0 and na < 0.75, "both part way: " .. oa .. ", " .. na)
+    local os, ns_ = T.va(ForagerTrackButton1.glow), T.va(ForagerTrackButton2.glow)
+    check(os > 0 and os < 1 and ns_ > 0 and ns_ < 1, "both shimmers part way: " .. os .. ", " .. ns_)
+    check(rawget(ForagerTrackButton1.glow, "shown") and rawget(ForagerTrackButton1.anim, "playing"), "the old shimmer keeps its flipbook while it fades")
+    check(rawget(ForagerTrackButton2.glow, "shown") and rawget(ForagerTrackButton2.anim, "playing"), "the new shimmer plays as it fades in")
+    T.frame(0.05)
+    check(old.actors[1].actorAlpha < oa and new.actors[1].actorAlpha > na, "the old glitter goes down while the new one comes up")
+    check(T.va(ForagerTrackButton1.glow) < os and T.va(ForagerTrackButton2.glow) > ns_, "the old shimmer goes down while the new one comes up")
+    check(rawget(old, "shown"), "the old glitter is not hidden before it has faded out")
+    T.frame(0.5)
+    check(rawget(old, "shown") == false and old.actors[1].actorAlpha == 0, "the old glitter hidden once faded out")
+    check(rawget(ForagerTrackButton1.glow, "shown") == false and not rawget(ForagerTrackButton1.anim, "playing") and T.va(ForagerTrackButton1.glow) == 0, "the old shimmer faded out and stopped")
+    check(T.va(ForagerTrackButton2.glow) == 1 and new.actors[1].actorAlpha == 0.75, "the new one at full")
+  ` + MODEL(2, 166336) + TO_NEXT + MODEL(1, 166336) + TO_NEXT + `
+    check(#T.scenes() == 2, "never a third scene, however many changes")
+  `, { atlas: true });
+  run('crossfade: the round glow fades the same way, its pulse running', FADE_HELPERS + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    SlashCmdList.FORAGER("shape round")
+    T.advance(6.5)
+  ` + TO_NEXT + `
+    local og, ng = ForagerTrackButton1.fgCircle.glow, ForagerTrackButton2.fgCircle.glow
+    local oa, na = T.va(og), T.va(ng)
+    check(oa > 0 and oa < 1 and na > 0 and na < 1, "both round glows part way: " .. oa .. ", " .. na)
+    check(rawget(ForagerTrackButton2.fgCircle.glowAnim, "playing") and rawget(ng, "shown"), "the new round glow pulses as it fades in")
+    check(not rawget(ForagerTrackButton1.glow, "shown") and not rawget(ForagerTrackButton2.glow, "shown"), "no square shimmer on round icons")
+    T.frame(0.05)
+    check(T.va(og) < oa and T.va(ng) > na, "the old round glow goes down while the new one comes up")
+    T.frame(0.5)
+    check(not rawget(og, "shown") and not rawget(ForagerTrackButton1.fgCircle.glowAnim, "playing") and T.va(ng) == 1, "settled")
+  `, { atlas: true });
+  run('crossfade: pausing fades the glitter out, then hides it; a quick toggle turns round from where it was', FADE_HELPERS + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + MODEL(1, 166336) + `
+    local scene = T.sceneOn(ForagerTrackButton1)
+    SlashCmdList.FORAGER("off")
+    T.frame(0.1)
+    local a = scene.actors[1].actorAlpha
+    check(rawget(scene, "shown") and a > 0 and a < 0.75, "fading out, still shown: " .. a)
+    T.frame(0.1)
+    local half = scene.actors[1].actorAlpha
+    check(math.abs(half - 0.375) < 1e-6, "halfway after 0.2 s of 0.4: " .. half)
+    SlashCmdList.FORAGER("on")
+    check(math.abs(scene.actors[1].actorAlpha - half) < 1e-6, "no jump when it turns round")
+    T.frame(0.1)
+    check(scene.actors[1].actorAlpha > half and rawget(scene, "shown"), "back up from there")
+    T.frame(0.1)
+    check(math.abs(scene.actors[1].actorAlpha - 0.75) < 1e-6, "full again after the 0.2 s that was left")
+    SlashCmdList.FORAGER("off")
+    T.frame(0.2)
+    check(rawget(scene, "shown"), "not hidden part way")
+  ` + MODEL_OFF, { atlas: true });
+  run('sparkle effect: the button cycles, the choice is saved, and the new effect crossfades in', FADE_HELPERS + OPEN + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + MODEL(1, 166336) + `
+    local b = NS.effectButton
+    check(rawget(b, "text") == "Effect 1/8", "the button: " .. tostring(rawget(b, "text")))
+    check(ForagerDB.sparkleModel == nil, "nothing saved until the player picks")
+    b.scripts.OnClick(b, "LeftButton")
+    check(ForagerDB.sparkleModel == 166060 and rawget(b, "text") == "Effect 2/8", "left-click: the next effect, saved")
+    T.frame(0.1)
+    local shown = {}
+    for _, scene in ipairs(T.scenes()) do if rawget(scene, "shown") then shown[scene.actors[1].model] = scene end end
+    local old, new = shown[166336], shown[166060]
+    check(old and new, "both effects showing mid-fade")
+    local p1, p2 = rawget(old, "_point"), rawget(new, "_point")
+    check(p1[2] == ForagerTrackButton1.icon and p2[2] == ForagerTrackButton1.icon, "both on the active tracker")
+    local oa, na = old.actors[1].actorAlpha, new.actors[1].actorAlpha
+    check(oa > 0 and oa < 0.75 and na > 0 and na < 0.6, "both part way: " .. oa .. ", " .. na)
+    T.frame(0.05)
+    check(old.actors[1].actorAlpha < oa and new.actors[1].actorAlpha > na, "the old effect goes down while the new one comes up")
+  ` + MODEL(1, 166060) + `
+    b.scripts.OnClick(b, "RightButton")
+    check(ForagerDB.sparkleModel == 166336 and rawget(b, "text") == "Effect 1/8", "right-click: back")
+  ` + MODEL(1, 166336) + `
+    for _ = 1, 8 do b.scripts.OnClick(b, "LeftButton") T.frame(0.5) end
+    check(ForagerDB.sparkleModel == 166336, "all the way round")
+    check(#T.scenes() == 2, "never a third scene")
+  `, { atlas: true });
+  run('sparkle effect: one the client lacks is skipped both ways, and debug lists it', FADE_HELPERS + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    SlashCmdList.FORAGER("sparkles next")
+    check(ForagerDB.sparkleModel == 166062, "faerie fire skipped, on to the specks")
+  ` + MODEL(1, 166062) + `
+    SlashCmdList.FORAGER("sparkles previous")
+    check(ForagerDB.sparkleModel == 166336, "skipped going back too")
+    SlashCmdList.FORAGER("debug")
+    local seen = false
+    for _, m in ipairs(T.prints) do
+      if m:find("loaded: 1 Holy glitter, 3 Faerie fire specks; skipped: 2 Faerie fire (166060)", 1, true) then seen = true end
+    end
+    check(seen, "debug lists what loaded and what was skipped")
+  `, { atlas: true, modelDeny: '{ [166060] = true }' });
+  run('sparkle effect: the slash forms', FADE_HELPERS + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    SlashCmdList.FORAGER("sparkles 5")
+    check(ForagerDB.sparkleModel == 166338 and T.prints[#T.prints]:find("sparkle effect 5 of 8: Holy glitter, ground", 1, true), "a number picks it: " .. T.prints[#T.prints])
+  ` + MODEL(1, 166338) + `
+    local scene = T.sceneOn(ForagerTrackButton1)
+    check(math.abs((scene.actors[1].pitch or 0) - math.pi / 2) < 1e-6, "the ground effect tipped to face the camera")
+    SlashCmdList.FORAGER("sparkles previous")
+    check(ForagerDB.sparkleModel == 165589, "previous")
+  ` + MODEL(1, 165589) + `
+    check((T.sceneOn(ForagerTrackButton1).actors[1].pitch or 0) == 0, "an upright effect is not tipped")
+    SlashCmdList.FORAGER("sparkles next")
+    check(ForagerDB.sparkleModel == 166338, "next")
+    for _, bad in ipairs({ "0", "9", "2.5", "banana" }) do
+      SlashCmdList.FORAGER("sparkles " .. bad)
+      check(ForagerDB.sparkleModel == 166338 and T.prints[#T.prints]:find("usage: /forager sparkles", 1, true), "refused: " .. bad)
+    end
+    SlashCmdList.FORAGER("sparkles")
+    check(ForagerDB.sparkles == false, "the bare command still turns them off")
+  `, { atlas: true });
+  run('sparkle effect: the saved choice is used after a reload', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + MODEL(1, 165589), { atlas: true, db: '{ sparkleModel = 165589 }' });
+  run('sparkle effect: picked before any tracker is on, used when one is', `
+    SlashCmdList.FORAGER("sparkles 3")
+    check(ForagerDB.sparkleModel == 166062, "saved before anything is built")
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + MODEL(1, 166062), { atlas: true });
+  run('sparkle size: live, the scene grows with it, saved; the slider and the slash form', FADE_HELPERS + OPEN + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    check(ForagerDB.sparkleSize == 100 and ForagerDB.sparkleIntensity == 100, "defaults 100%")
+  ` + MODEL(1, 166336) + `
+    local sl = NS.sparkleSizeSlider
+    sl.scripts.OnValueChanged(sl, 200)
+    check(ForagerDB.sparkleSize == 200, "the slider saves 200%")
+    check(math.abs(NS.SparkleReach() - 62) < 1e-9, "reach 62 px at 200%")
+  ` + MODEL(1, 166336) + `
+    local scene = T.sceneOn(ForagerTrackButton1)
+    check(rawget(scene, "_w") == 148, "the scene grew to 148, got " .. tostring(rawget(scene, "_w")))
+    SlashCmdList.FORAGER("sparkles size 50")
+    check(ForagerDB.sparkleSize == 50 and T.prints[#T.prints]:find("sparkle size 50%", 1, true), "the slash form")
+  ` + MODEL(1, 166336) + `
+    check(rawget(T.sceneOn(ForagerTrackButton1), "_w") == 104, "the scene back to its least, 104")
+    for _, bad in ipairs({ "45", "205", "120.5", "big", "" }) do
+      SlashCmdList.FORAGER("sparkles size " .. bad)
+      check(ForagerDB.sparkleSize == 50 and T.prints[#T.prints]:find("usage: /forager sparkles size", 1, true), "refused: '" .. bad .. "'")
+    end
+    SlashCmdList.FORAGER("sparkles next")
+  ` + MODEL(1, 166060) + `
+  `, { atlas: true });
+  run('sparkle intensity: live, and it multiplies with the fades', FADE_HELPERS + OPEN + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    local sl = NS.sparkleIntensitySlider
+    sl.scripts.OnValueChanged(sl, 50)
+    check(ForagerDB.sparkleIntensity == 50, "the slider saves 50%")
+    local scene = T.sceneOn(ForagerTrackButton1)
+    check(math.abs(scene.actors[1].actorAlpha - 0.375) < 1e-9, "at once: 0.75 times 50%, got " .. scene.actors[1].actorAlpha)
+  ` + MODEL(1, 166336) + TO_NEXT + `
+    local old, new = T.sceneOn(ForagerTrackButton1), T.sceneOn(ForagerTrackButton2)
+    local oa, na = old.actors[1].actorAlpha, new.actors[1].actorAlpha
+    check(oa > 0 and oa < 0.375 and na > 0 and na < 0.375, "a crossfade runs between 0 and the chosen strength: " .. oa .. ", " .. na)
+  ` + MODEL(2, 166336) + `
+    SlashCmdList.FORAGER("off")
+    T.frame(0.1)
+    local scene2 = T.sceneOn(ForagerTrackButton2)
+    check(math.abs(scene2.actors[1].actorAlpha - 0.28125) < 1e-9, "fading out from the chosen strength, a quarter gone after 0.1 s: " .. scene2.actors[1].actorAlpha)
+    SlashCmdList.FORAGER("on")
+  ` + MODEL(2, 166336) + `
+    SlashCmdList.FORAGER("sparkles intensity 0")
+    check(ForagerDB.sparkleIntensity == 0 and T.sceneOn(ForagerTrackButton2).actors[1].actorAlpha == 0, "0% draws nothing")
+    SlashCmdList.FORAGER("sparkles intensity 100")
+  ` + MODEL(2, 166336) + `
+    for _, bad in ipairs({ "101", "-5", "half" }) do
+      SlashCmdList.FORAGER("sparkles intensity " .. bad)
+      check(ForagerDB.sparkleIntensity == 100 and T.prints[#T.prints]:find("usage: /forager sparkles", 1, true), "refused: " .. bad)
+    end
+  `, { atlas: true });
+  run('sparkle size and intensity: grayed while the sparkles are off, laid out without overlap', OPEN + `
+    local box
+    for _, f in ipairs(T.frames) do local l = rawget(f, "label") if type(l) == "table" and rawget(l, "text") == "Sparkles on the active tracker" then box = f end end
+    local size, strength = NS.sparkleSizeSlider, NS.sparkleIntensitySlider
+    for _, s in ipairs({ size, strength }) do check(rawget(s, "enabled") == true and rawget(s, "alpha") == 1, "live while on") end
+    box.checked = false box.scripts.OnClick(box)
+    for _, s in ipairs({ size, strength }) do
+      check(rawget(s, "enabled") == false and rawget(s, "alpha") == 0.5 and rawget(s.fgCaption, "font") == GameFontDisable, "grayed while off")
+    end
+    box.checked = true box.scripts.OnClick(box)
+    check(rawget(size, "enabled") == true, "live again")
+    -- The rows: the checkbox and effect button, then the two sliders, then Icon size.
+    local function y(f) local p = rawget(f, "_point") return p[#p] end
+    local function holder(s) return rawget(s, "parent") end
+    local iconSize = holder(NS.opacitySlider) -- any OptionSlider holder has the same height
+    local below
+    for _, f in ipairs(T.frames) do
+      local cap = rawget(f, "parent") and rawget(f, "_h") == 40 and f ~= holder(size) and f ~= holder(strength) and f
+      if cap then local p = rawget(f, "_point") if p and p[2] == 356 and p[3] < y(holder(strength)) and (not below or p[3] > y(below)) then below = f end end
+    end
+    check(y(box) - 24 >= y(holder(size)), "the checkbox row ends above the size slider")
+    check(y(NS.effectButton) - 22 >= y(holder(size)), "the effect button ends above the size slider")
+    check(y(holder(size)) - 40 >= y(holder(strength)), "the size slider ends above the intensity slider")
+    check(below ~= nil and y(holder(strength)) - 40 >= y(below), "the intensity slider ends above Icon size")
+    local hint
+    for _, fs in ipairs(T.strings) do local t = rawget(fs, "text") if type(t) == "string" and t:find("^More key bindings") then hint = fs end end
+    check(y(hint) - 36 >= -rawget(content, "_h"), "the right column still fits: hint at " .. y(hint) .. " of " .. tostring(rawget(content, "_h")))
+  `);
+  run('the standalone window shrinks to fit a short screen', `
+    UIParent.GetHeight = function() return 768 end
+  ` + OPEN + `
+    local scale = rawget(ForagerOptions, "scale")
+    check(scale and math.abs(scale - (768 - 40) / (870 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
+  `);
+  run('drawn sparkles follow the size and intensity', SPARK_HELPERS + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    SlashCmdList.FORAGER("sparkles size 200")
+    SlashCmdList.FORAGER("sparkles intensity 50")
+    T.finishSparks() -- the ones out before the change finish at the old size
+    local seen = 0
+    T.sparkTicks(40, function(b)
+      for _, s in ipairs(b.fgSparks) do
+        if rawget(s.anim, "playing") then
+          seen = seen + 1
+          local o = rawget(s.move, "offset")
+          local drift = math.sqrt(o[1] * o[1] + o[2] * o[2])
+          check(drift >= 8 - 1e-6 and drift <= 16 + 1e-6, "drift doubled: " .. drift)
+          check(rawget(s.tex, "_w") == 28, "spark doubled: " .. tostring(rawget(s.tex, "_w")))
+          check(rawget(s.fadeIn, "toAlpha") == 0.5 and rawget(s.fadeOut, "fromAlpha") == 0.5, "at half strength")
+        end
+      end
+    end)
+    check(seen > 0, "sparks ran")
+    SlashCmdList.FORAGER("sparkles intensity 0")
+    check(T.sparkTicks(40) == 0, "none at 0%")
+  `, { atlas: true, noModelScene: true });
+  run('sparkles: a client missing the first effect gets the next one', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + MODEL(1, 166060), { atlas: true, modelDeny: '{ [166336] = true }' });
+  run('sparkles: none of the effects on the client, so drawn sparkles, and debug says why', SPARK_HELPERS + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    local path, why = NS.SparklePath()
+    check(path == "drawn sparkles" and why:find("none of the sparkle effects", 1, true), "path: " .. tostring(path) .. ", " .. tostring(why))
+    check(T.sparkTicks(40) > 0, "the drawn sparkles run instead")
+    SlashCmdList.FORAGER("debug")
+    local seen = false
+    for _, m in ipairs(T.prints) do if m:find("sparkles on: drawn sparkles, this client has none of the sparkle effects", 1, true) then seen = true end end
+    check(seen, "debug says why")
+  `, { atlas: true, modelDeny: '{ [166336] = true, [166060] = true, [166062] = true, [165589] = true, [166338] = true, [166322] = true, [775512] = true, [426041] = true }' });
+  run('sparkles: no ModelScene on the client, so drawn sparkles', SPARK_HELPERS + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    local path, why = NS.SparklePath()
+    check(path == "drawn sparkles" and why:find("no ModelScene", 1, true), "path: " .. tostring(path) .. ", " .. tostring(why))
+    check(T.sparkTicks(40) > 0, "the drawn sparkles run instead")
+  `, { atlas: true, noModelScene: true });
+  run('drawn sparkles: only on the active tracker, from its edge, just behind the bar frame', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    check(T.active() == "Find Herbs" and ForagerDB.sparkles == true, "herbs on, sparkles on by default")
+  ` + SPARKS('bar', 1) + `
+    check(rawget(ForagerTrackButton2, "fgSparks") == nil, "nothing made for a tracker that has not been on")
+  `, { noModelScene: true, atlas: true });
+  run('drawn sparkles follow the active tracker', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + SPARKS('bar', 1) + `
+    T.advance(6.5)
+    check(T.active() == "Find Minerals", "minerals on")
+    -- Herbs' sparks finish their own short life; none start there now.
+    T.finishSparks()
+  ` + SPARKS('bar', 2), { noModelScene: true, atlas: true });
+  run('drawn sparkles stop when paused, hidden, hidden in combat, or switched off', SPARK_HELPERS + OPEN + `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    check(T.sparkTicks(20) > 0, "sparkling")
+    SlashCmdList.FORAGER("off")
+    check(T.sparkTicks(20) == 0, "none while paused")
+    SlashCmdList.FORAGER("on")
+    check(T.sparkTicks(20) > 0, "back when resumed")
+    T.ticker()
+    SlashCmdList.FORAGER("sparkles")
+    check(ForagerDB.sparkles == false and T.sparksOut(ForagerTrackButton1) == 0, "the command turns them off at once")
+    check(T.sparkTicks(20) == 0, "and they stay off")
+    local box
+    for _, f in ipairs(T.frames) do local l = rawget(f, "label") if type(l) == "table" and rawget(l, "text") == "Sparkles on the active tracker" then box = f end end
+    check(box ~= nil, "the option is in the options")
+    box.checked = true box.scripts.OnClick(box)
+    check(ForagerDB.sparkles == true and T.sparkTicks(20) > 0, "the option turns them on")
+    SlashCmdList.FORAGER("icons")
+    check(ForagerDB.bar == false and T.sparkTicks(20) == 0, "none while the icons are hidden")
+    SlashCmdList.FORAGER("icons")
+    ForagerDB.barHideCombat = true
+    T.combat = true
+    check(T.sparkTicks(20) == 0, "none in combat when the icons hide there")
+    T.combat = false
+    check(T.sparkTicks(20) > 0, "back after combat")
+  `, { noModelScene: true, atlas: true });
+  run('drawn sparkles round the minimap ring, just under it', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    SlashCmdList.FORAGER("shape round")
+    T.advance(6.5)
+  ` + SPARKS('circle-ring', 1), { noModelScene: true, atlas: true });
+  run('drawn sparkles behind the dark edge of a round icon', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + SPARKS('circle-edge', 1), { noModelScene: true, atlas: true, db: '{ style = "dark", iconShape = "round" }' });
+  run("drawn sparkles behind Dark's square edge, also after a live change of shape", `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+  ` + SPARKS('square', 1) + `
+    SlashCmdList.FORAGER("shape round")
+  ` + SPARKS('circle-edge', 1), { noModelScene: true, atlas: true, db: '{ style = "dark" }' });
+  run('/forager debug icons reports each icon and keeps it in the saved log', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    SlashCmdList.FORAGER("shape round")
+    T.advance(6.5)
+    local before = #T.prints
+    SlashCmdList.FORAGER("debug icons")
+    check(#T.prints - before == 3, "a line per icon and the pause button, got " .. (#T.prints - before))
+    check(T.prints[before + 1]:find("look circle%-ring") and T.prints[before + 1]:find("round glow ring at"), "the circle's pieces: " .. T.prints[before + 1])
+    local logged = 0
+    for _, line in ipairs(ForagerLog.lines) do if line:find("icon %d: look") then logged = logged + 1 end end
+    check(logged == 3, "kept in the saved log")
+  `, { atlas: true });
+  run('/forager debug icons names the color sweep on the action bar look', `
+    T.fire("PLAYER_ENTERING_WORLD")
+    T.advance(6.5)
+    local before = #T.prints
+    SlashCmdList.FORAGER("debug icons")
+    check(T.prints[before + 1]:find("look bar", 1, true) and T.prints[before + 1]:find(", color, shown", 1, true), "the line: " .. T.prints[before + 1])
   `, { atlas: true });
   run('icon shape: Automatic follows a style drawn live', `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -1019,12 +1764,23 @@ if (!EUI_ON) {
   ` + ICONS('square', 'eui') + `
     SlashCmdList.FORAGER("shape round")
     check(ForagerDB.iconShape == "round" and NS.Styles.Applied() == "eui", "Round under EllesmereUI")
-  ` + ICONS('circle-edge', 'eui', 'square') + `
+  ` + ICONS('circle-edge', 'eui') + `
+    T.advance(6.5) -- the next tracker comes on, and the round glow with it
+    check(rawget(ForagerTrackButton2.fgCircle.glow, "shown") == true, "round glow on the new tracker")
+  ` + ICONS('circle-edge', 'eui') + `
     SlashCmdList.FORAGER("shape square")
   ` + ICONS('square', 'eui') + `
     local n, errs = T.skinErrors()
     check(n == 0, "no skin errors: " .. errs)
   `, { atlas: true });
+  run('sparkles: the glitter model under EllesmereUI', `
+    T.advance(6.5)
+  ` + MODEL(1, 166336) + `
+    SlashCmdList.FORAGER("shape round")
+  ` + MODEL(1, 166336), { atlas: true });
+  run("drawn sparkles behind EllesmereUI's square edge", `
+    T.advance(6.5)
+  ` + SPARKS('square', 1), { noModelScene: true, atlas: true });
   run('Blizzard chosen with EllesmereUI running: nothing skinned', OPEN + `
     T.fire("PLAYER_ENTERING_WORLD")
     T.advance(6.5)
