@@ -2229,5 +2229,58 @@ run('the options page scrolls with the wheel, over sliders too, and hides its ba
   for i = 1, 100 do sc.scripts.OnMouseWheel(sc, 1) end
   check(at == 0, "stops at the top")
 `, { page: true });
+const PRINTED = `
+  function T.printed(text)
+    for _, m in ipairs(T.prints) do if tostring(m):find(text, 1, true) then return true end end
+    return false
+  end
+`
+run('a slow server is not mistaken for a refused timer', PRINTED + `
+  T.lag = 1.6 -- every switch lands 1.6 s after it is cast
+  T.advance(45)
+  check(ForagerDB.method == "timer", "still on the timer, got " .. tostring(ForagerDB.method))
+  check(T.switches >= 5, "and switching: " .. tostring(T.switches))
+  check(not T.printed("next key press"), "no fallback message")
+`);
+run('switches the game truly ignores still fall back to key presses, and the timer is retried at the next login', PRINTED + `
+  local real = C_Minimap.SetTracking
+  C_Minimap.SetTracking = function() end -- ignored without a word
+  T.advance(30)
+  check(ForagerDB.method == "key" and ForagerDB.methodWhy == "silent", "fell back: " .. tostring(ForagerDB.method) .. "/" .. tostring(ForagerDB.methodWhy))
+  check(T.printed("/forager retest"), "told how to try the timer again")
+  -- Next login: the timer gets another chance, without a message this time.
+  T.prints = {}
+  T.fire("ADDON_LOADED", "Forager")
+  check(ForagerDB.method == nil, "retried at load")
+  C_Minimap.SetTracking = real
+  T.advance(8)
+  check(ForagerDB.method == "timer" and ForagerDB.methodWhy == nil, "the timer works now: " .. tostring(ForagerDB.method))
+  check(T.active() ~= nil, "and switched")
+`);
+run('key press mode saved by an older version is retried once, with a note', PRINTED + `
+  ForagerDB.method = "key" ForagerDB.methodWhy = nil
+  T.fire("ADDON_LOADED", "Forager")
+  check(ForagerDB.method == nil, "reset at load")
+  T.fire("PLAYER_LOGIN")
+  check(T.printed("older version"), "a note in chat")
+  T.advance(8)
+  check(ForagerDB.method == "timer", "switching on the timer: " .. tostring(ForagerDB.method))
+`);
+run('a real refusal stays in key press mode', PRINTED + `
+  ForagerDB.method = "key" ForagerDB.methodWhy = "blocked"
+  T.fire("ADDON_LOADED", "Forager")
+  check(ForagerDB.method == "key", "kept: " .. tostring(ForagerDB.method))
+  T.blockTimer = true
+  ForagerDB.method = nil ForagerDB.methodWhy = nil
+  T.advance(7)
+  check(ForagerDB.method == "key" and ForagerDB.methodWhy == "blocked", "a block is remembered as one")
+  SlashCmdList.FORAGER("retest")
+  check(ForagerDB.method == nil and ForagerDB.methodWhy == nil, "retest clears it")
+`);
+run('in key press mode the status says how to get the timer back', PRINTED + `
+  ForagerDB.method = "key" ForagerDB.methodWhy = "blocked"
+  SlashCmdList.FORAGER("debug")
+  check(T.printed("next key press") and T.printed("/forager retest"), "the hint is shown")
+`);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

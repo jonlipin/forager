@@ -60,6 +60,8 @@ local lastSwitch = 0  -- GetTime() of the last change of tracking spell
 local lastActive       -- key of the tracking spell last seen on
 local attempt          -- the switch waiting to be confirmed
 local silentFails = 0
+local lateCheck        -- a switch not on after 1 s, waiting a little longer for its verdict
+local LATE_WAIT = 3    -- more seconds a switch gets to land before it counts as ignored
 local failing = {}     -- [key] = GetTime() until which a tracker that failed to cast is skipped
 local looting = false  -- the loot window is open
 local override         -- { key, name, why, before } while a situation calls for a tracker
@@ -321,6 +323,53 @@ local function Due()
     return GetTime() - lastSwitch >= db.delay
 end
 
+-- A switch that landed, whenever it did.
+local function Landed(a, s, late)
+    a.landed = true
+    placedKey = a.target
+    if InRotation(a.target) and not (s.byKey[a.target] and s.byKey[a.target].alongside) then
+        currentKey = a.target
+    end
+    silentFails = 0
+    failing[a.target] = nil
+    if a.source == "timer" and db.method ~= "timer" and db.method ~= "none" then
+        if db.method == "key" then Log("the timer works again: back from key presses") end
+        db.method = "timer"
+        db.methodWhy = nil
+        Log("method learned: timer")
+    end
+    Log("switched to " .. a.name .. " (" .. a.source .. ")" .. (late and ", landed late" or ""))
+end
+
+-- The last word on a switch that wasn't on after a second. Only a switch that
+-- never landed counts toward "the timer doesn't work": before 1.12.3 a slow
+-- server, or a tracker kept on alongside (Find Treasure, before 1.9.1), made
+-- switches that had worked look ignored, and three of those in a row put
+-- Forager on key presses for good.
+local function LateVerdict(a)
+    if lateCheck == a then lateCheck = nil end
+    if a.landed or a.gameError or a.blocked then return end
+    local s = Scan()
+    if s.on[a.target] then
+        Landed(a, s, true)
+        return
+    end
+    silentFails = silentFails + 1
+    Log("switch to " .. a.name .. " (" .. a.source .. ") did not take, now " .. NameOf(s, s.active) .. ", " .. silentFails .. " in a row")
+    if a.source == "timer" and silentFails >= 3 then
+        local again = db.methodWhy == "silent"
+        db.method = "key"
+        db.methodWhy = "silent"
+        silentFails = 0
+        Log("method learned: key (timer switches never took)")
+        if not again then
+            Print("switches from a timer didn't take three times in a row, so Forager will switch on your next key press after the delay. /forager retest tries the timer again.")
+        end
+        SetUpKeys()
+    end
+    if RefreshOptions then RefreshOptions() end
+end
+
 local function Verify()
     local a = attempt
     if not a or a.done then return end
@@ -328,31 +377,15 @@ local function Verify()
     local s = Scan()
     if mutedAt and not s.on[a.target] then Unmute() end
     if s.on[a.target] then
-        placedKey = a.target
-        if InRotation(a.target) and not (s.byKey[a.target] and s.byKey[a.target].alongside) then
-            currentKey = a.target
-        end
-        silentFails = 0
-        failing[a.target] = nil
-        if db.method == nil and a.source == "timer" then
-            db.method = "timer"
-            Log("method learned: timer")
-        end
-        Log("switched to " .. a.name .. " (" .. a.source .. ")")
+        Landed(a, s)
     elseif a.gameError then
         -- The game said why (wrong form, not enough mana...): skip that one a while.
         failing[a.target] = GetTime() + 60
         Log("switch to " .. a.name .. " failed: " .. a.gameError .. ", skipped for 60 s")
     elseif not a.blocked then
-        silentFails = silentFails + 1
-        Log("switch to " .. a.name .. " (" .. a.source .. ") did not take, now " .. NameOf(s, s.active) .. ", " .. silentFails .. " in a row")
-        if a.source == "timer" and silentFails >= 3 then
-            db.method = "key"
-            silentFails = 0
-            Log("method learned: key (timer switches never took)")
-            Print("switching from a timer doesn't work here, so Forager will switch on your next key press after the delay.")
-            SetUpKeys()
-        end
+        -- Not on yet: a slow server can take longer than a second.
+        lateCheck = a
+        C_Timer.After(LATE_WAIT, function() LateVerdict(a) end)
     end
     if RefreshOptions then RefreshOptions() end
 end
@@ -576,6 +609,11 @@ end
 
 local function OnTrackingChanged()
     local s = Scan()
+    if lateCheck and not lateCheck.landed and s.on[lateCheck.target] then
+        Landed(lateCheck, s, true)
+        lateCheck = nil
+        s = Scan()
+    end
     if attempt and not attempt.done and s.on[attempt.target] then
         placedKey = attempt.target
         if InRotation(attempt.target) and s.byKey[attempt.target] and not s.byKey[attempt.target].alongside then
@@ -606,11 +644,13 @@ local function OnRefused(event, addon)
     a.blocked = true
     if a.source == "timer" then
         db.method = "key"
+        db.methodWhy = "blocked"
         Log("method learned: key")
         Print("the game only allows switching tracking during a key press, so Forager will switch on your next key press after the delay.")
         SetUpKeys()
     elseif a.source == "key" then
         db.method = "none"
+        db.methodWhy = "blocked"
         Log("method learned: none")
         Print("the game refuses addon tracking switches altogether, so Forager can't switch for you. /forager retest tries again.")
     end
@@ -706,6 +746,9 @@ local function StatusText()
         "Rotating: |cffffffff" .. (#names > 0 and table.concat(names, ", ") or "nothing") .. "|r",
         "Switches " .. MethodText(),
     }
+    if db.method == "key" or db.method == "none" then
+        lines[#lines + 1] = "|cff9d9d9dTry the timer again: /forager retest, or the button in the options|r"
+    end
     if #out > 0 then table.insert(lines, 3, "Left out: |cff9d9d9d" .. table.concat(out, ", ") .. "|r") end
     if #db.tracks > 1 then table.insert(lines, 1, "Track: |cffffffff" .. TrackName() .. "|r") end
     local reason = Blocker(s)
@@ -1990,7 +2033,7 @@ local function BuildContent()
     status:SetSpacing(3)
     optionRefreshers[#optionRefreshers + 1] = function() status:SetText(StatusText()) end
     PanelButton(c, "Try the timer again", RIGHT, -792, 160, function()
-        db.method = nil
+        db.method, db.methodWhy = nil, nil
         silentFails = 0
         Log("method reset from options")
         RefreshOptions()
@@ -2443,7 +2486,7 @@ SlashCmdList.FORAGER = function(msg)
             Print(found.name .. " is already at the " .. (dir < 0 and "top" or "bottom") .. ".")
         end
     elseif cmd == "retest" then
-        db.method = nil
+        db.method, db.methodWhy = nil, nil
         silentFails = 0
         Log("method reset by /forager retest")
         Print("trying the timer again")
@@ -2546,11 +2589,26 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         db.lastTracked = db.lastTracked or {}
         -- Sound left muted by a reload in the middle of a switch.
         if db.unmuteSFX then Unmute() end
+        -- Key press mode the game didn't ask for gets another try at the timer:
+        -- once for a mode saved before 1.12.3 (most likely by the old Find Treasure
+        -- bug or a slow server), and at each login when switches merely seemed
+        -- ignored. A real refusal ("blocked") stays until /forager retest.
+        if db.method == "key" and db.methodWhy ~= "blocked" then
+            ns.retimed = db.methodWhy == nil and "old" or "silent"
+            db.method = nil
+        end
         db.barPoint = nil -- 1.1.0 kept the position in another form
         ForagerLog = ForagerLog or {}
         ForagerLog.lines = ForagerLog.lines or {}
         ForagerLog.session = (ForagerLog.session or 0) + 1
     elseif event == "PLAYER_LOGIN" then
+        if ns.retimed then
+            Log("key press mode reset to try the timer again (" .. ns.retimed .. ")")
+            if ns.retimed == "old" then
+                Print("switching on a timer again. An older version had fallen back to switching on key presses by mistake.")
+            end
+            ns.retimed = nil
+        end
         lastSwitch = GetTime()
         local s = Scan()
         lastActive = s.active
