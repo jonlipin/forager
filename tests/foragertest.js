@@ -478,9 +478,10 @@ run('rotates through every ticked tracker', `
   T.advance(6.5) check(T.active() == "Track Beasts", "3: beasts, got " .. tostring(T.active()))
   T.advance(6.5) check(T.active() == "Find Herbs", "back to herbs")
 `);
-run('an unticked tracker leaves only one and nothing switches', `
+run('with one tracker ticked it is kept on and nothing else switches', `
   ForagerDB.rotation[2580] = nil
-  T.advance(20) check(T.active() == nil, "one tracker is no rotation")
+  T.advance(20) check(T.active() == "Find Herbs", "herbs put on, got " .. tostring(T.active()))
+  check(T.switches == 1, "and left on: " .. tostring(T.switches) .. " switches")
 `);
 run('a tracker that fails to cast is skipped', `
   ForagerDB.rotation[1494] = true
@@ -1537,7 +1538,7 @@ if (!EUI_ON) {
     UIParent.GetHeight = function() return 768 end
   ` + OPEN + `
     local scale = rawget(ForagerOptions, "scale")
-    check(scale and math.abs(scale - (768 - 40) / (870 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
+    check(scale and math.abs(scale - (768 - 40) / (900 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
   `);
   run('drawn sparkles follow the size and intensity', SPARK_HELPERS + `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -1701,7 +1702,7 @@ if (!EUI_ON) {
     for i = 1, 7 do T.tracking[#T.tracking + 1] = { name = "Track " .. i, spellID = 9000 + i, type = "spell", active = false, texture = 9 } end
   ` + OPEN + `
     local function y(f) local p = rawget(f, "_point") return p[#p] end
-    local look, trackers = T.string("Look"), T.string("Trackers to rotate")
+    local look, trackers = T.string("Look"), T.string("Tracks and trackers")
     local note
     for _, fs in ipairs(T.strings) do local t = rawget(fs, "text") if type(t) == "string" and t:find("^In use") then note = fs end end
     local holder = rawget(NS.opacitySlider, "parent")
@@ -1925,6 +1926,116 @@ run('a tracker that unexpectedly stays on does not stick the rotation', `
   end
   check(herbs >= 2 and minerals >= 2, "still rotating: herbs " .. herbs .. ", minerals " .. minerals)
   check(ForagerDB.method == "timer", "no switch read as failed")
+`);
+
+const TRACKBTN = `
+  function T.trackButton(name)
+    for i = 1, 20 do
+      local b = _G["ForagerTrackButton" .. i]
+      if b and rawget(b, "key") then
+        for _, e in ipairs(T.tracking) do
+          if e.name == name and e.spellID == rawget(b, "key") then return b end
+        end
+      end
+    end
+  end
+`;
+run('right-click an icon to leave it out of the rotation, and again to put it back', TRACKBTN + `
+  ForagerDB.rotation[1494] = true
+  T.advance(1)
+  local beasts = T.trackButton("Track Beasts")
+  check(beasts ~= nil, "beasts has an icon")
+  beasts.scripts.OnClick(beasts, "RightButton")
+  check(ForagerDB.skipped[1494] == true, "left out")
+  local seen = {}
+  for n = 1, 6 do T.advance(6.5) seen[T.active() or "none"] = true end
+  check(seen["Find Herbs"] and seen["Find Minerals"], "the others still rotate")
+  check(not seen["Track Beasts"], "beasts skipped")
+  check(T.trackButton("Track Beasts") ~= nil, "still on the icons")
+  beasts.scripts.OnClick(beasts, "RightButton")
+  check(ForagerDB.skipped[1494] == nil, "put back")
+  seen = {}
+  for n = 1, 6 do T.advance(6.5) seen[T.active() or "none"] = true end
+  check(seen["Track Beasts"], "beasts back in the rotation")
+`);
+run('left-click still turns a left-out tracker on, with its sound', TRACKBTN + `
+  ForagerDB.rotation[1494] = true
+  T.advance(1)
+  local beasts = T.trackButton("Track Beasts")
+  beasts.scripts.OnClick(beasts, "RightButton")
+  T.sfxAtCast = nil
+  beasts.scripts.OnClick(beasts, "LeftButton")
+  T.advance(1)
+  check(T.active() == "Track Beasts", "beasts on, got " .. tostring(T.active()))
+  check(T.sfxAtCast == "1", "sound kept on a click, got " .. tostring(T.sfxAtCast))
+  check(ForagerDB.skipped[1494] == true, "still left out")
+  T.advance(6.5)
+  check(T.active() == "Find Herbs" or T.active() == "Find Minerals", "the rotation carries on from it: " .. tostring(T.active()))
+  T.sfxAtCast = nil T.advance(6.5)
+  check(T.sfxAtCast == "0", "timer switches still quiet")
+`);
+run('leaving all but one out keeps that one on', TRACKBTN + `
+  ForagerDB.rotation[1494] = true
+  T.advance(1)
+  T.trackButton("Find Herbs").scripts.OnClick(T.trackButton("Find Herbs"), "RightButton")
+  T.trackButton("Find Minerals").scripts.OnClick(T.trackButton("Find Minerals"), "RightButton")
+  T.advance(7) check(T.active() == "Track Beasts", "beasts on")
+  local n = T.switches
+  T.advance(30) check(T.switches == n and T.active() == "Track Beasts", "and kept")
+`);
+run('tracks: only one runs, and switching hands over to the new one', `
+  ForagerDB.rotation[1494] = true
+  T.advance(6.5) check(T.active() == "Find Herbs", "track 1 running")
+  SlashCmdList.FORAGER("track new Hunting")
+  check(#ForagerDB.tracks == 2 and ForagerDB.track == 2, "new track is the current one")
+  check(ForagerDB.tracks[2].name == "Hunting", "named " .. tostring(ForagerDB.tracks[2].name))
+  ForagerDB.rotation[1494] = true ForagerDB.rotation[5225] = true
+  check(ForagerDB.tracks[2].rotation[1494] and not ForagerDB.tracks[1].rotation[5225], "ticks go to the current track only")
+  local seen = {}
+  for n = 1, 8 do T.advance(6.5) seen[T.active() or "none"] = true end
+  check(seen["Track Beasts"] and seen["Track Humanoids"], "Hunting rotates beasts and humanoids")
+  check(not seen["Find Herbs"] and not seen["Find Minerals"], "and only those: track 1 is not running")
+  -- Make sure Hunting's own tracker is the one on when the track changes.
+  local hum = ForagerTrackButton2
+  for i = 1, 4 do local b = _G["ForagerTrackButton" .. i] if b and rawget(b, "key") == 5225 then hum = b end end
+  hum.scripts.OnClick(hum, "LeftButton") T.advance(1.5)
+  check(T.active() == "Track Humanoids", "humanoids on before switching")
+  SlashCmdList.FORAGER("track 1")
+  check(ForagerDB.track == 1, "back on track 1")
+  T.advance(1)
+  check(T.active() == "Find Herbs" or T.active() == "Find Minerals" or T.active() == "Track Beasts",
+    "track 1 takes over at once: " .. tostring(T.active()))
+  seen = {}
+  for n = 1, 8 do T.advance(6.5) seen[T.active() or "none"] = true end
+  check(not seen["Track Humanoids"], "Hunting's humanoids no longer come round")
+  check(seen["Track Beasts"], "track 1's own beasts do")
+`);
+run('tracks: the label above the icons and the key binding switch them', `
+  SlashCmdList.FORAGER("track new Second")
+  ForagerDB.rotation[1494] = true ForagerDB.rotation[5225] = true
+  T.advance(1)
+  local label = ForagerTrackLabel
+  check(rawget(label, "shown") ~= false, "label shown with two tracks")
+  label.scripts.OnClick(label, "LeftButton") check(ForagerDB.track == 1, "label: next wraps to 1")
+  label.scripts.OnClick(label, "RightButton") check(ForagerDB.track == 2, "label: previous")
+  Forager_NextTrack() check(ForagerDB.track == 1, "binding: next")
+  SlashCmdList.FORAGER("track sec") check(ForagerDB.track == 2, "by name")
+`);
+run('tracks: delete needs a second click, rename sticks, saved once', `
+  SlashCmdList.FORAGER("track new Spare")
+  SlashCmdList.FORAGER("")
+  local del
+  for _, f in ipairs(T.frames) do if rawget(f, "text") == "Delete" then del = f end end
+  check(del ~= nil, "delete button")
+  del.scripts.OnClick(del) check(#ForagerDB.tracks == 2, "one click arms it")
+  del.scripts.OnClick(del) check(#ForagerDB.tracks == 1 and ForagerDB.track == 1, "second click deletes")
+  local box = ForagerTrackName
+  box.GetText = function() return "  Gathering  " end
+  box.scripts.OnEnterPressed(box)
+  check(ForagerDB.tracks[1].name == "Gathering", "renamed and trimmed: " .. tostring(ForagerDB.tracks[1].name))
+  T.fire("PLAYER_LOGOUT")
+  check(ForagerDB.rotation == nil and ForagerDB.skipped == nil, "the current track's tables are not saved twice")
+  check(ForagerDB.tracks[1].rotation[2383], "the track keeps its ticks")
 `);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

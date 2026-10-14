@@ -61,6 +61,7 @@ local looting = false  -- the loot window is open
 local override         -- { key, name, why, before } while a situation calls for a tracker
 local ownedKey         -- a situational tracker Forager put on, which the rotation may replace
 local currentKey       -- the rotation tracker Forager last switched to, while it is on
+local placedKey        -- any tracker Forager last turned on (so it is never "your own pick")
 local mutedAt          -- GetTime() when Forager muted sound effects
 local Mute, Unmute     -- defined with Cast
 local RefreshOptions, UpdateMinimapButton, SetUpKeys, UpdateBar, Toggle -- defined below
@@ -90,6 +91,30 @@ local function InRotation(key)
     return db.rotation[key] == true
 end
 
+-- Left out of the rotation for now by a right-click on its icon. It stays on
+-- the icons, greyed, and a left-click still turns it on.
+local function Skipped(key)
+    return db.skipped[key] == true
+end
+
+-- Tracks: named sets of ticked and left-out trackers to switch between, for
+-- example one for gathering and one for hunting. db.rotation and db.skipped
+-- always point at the current track's own tables.
+local function SelectTrack(i)
+    i = math.max(1, math.min(i or 1, #db.tracks))
+    local t = db.tracks[i]
+    t.rotation = t.rotation or {}
+    t.skipped = t.skipped or {}
+    t.name = t.name or ("Track " .. i)
+    db.track = i
+    db.rotation, db.skipped = t.rotation, t.skipped
+    return t
+end
+
+local function TrackName()
+    return db.tracks[db.track].name
+end
+
 -- Trackers that stay on alongside the others instead of replacing them. On
 -- WoW Forever, Find Treasure (the dwarf racial) runs next to hunter tracking
 -- and Find Herbs or Find Minerals. Ticked, it is kept on rather than rotated.
@@ -104,14 +129,16 @@ end
 --   s.list     { key, index, name, texture, active, alongside } per spell
 --   s.byKey    the same, by key (the spell ID, or the name when there is none)
 --   s.on       [key] = true for every tracker that is on (more than one can be)
---   s.rotation the ticked ones that take turns
+--   s.shown    the ticked ones that take turns, left-out ones included (the icons)
+--   s.rotation the ticked ones that take turns, without the left-out ones
+--   s.keepShown the ticked ones that stay on alongside, left-out ones included
 --   s.keep     the ticked ones that stay on alongside the rotation
 --   s.active   key of the rotation's tracker that is on: the one Forager last
 --              switched to while it is still on, else the first on in the list
 --   s.other    name of a tracker that is on, not ticked, and not one that
 --              stays on alongside the others (your own pick)
 local function Scan()
-    local s = { list = {}, byKey = {}, on = {}, rotation = {}, keep = {} }
+    local s = { list = {}, byKey = {}, on = {}, shown = {}, rotation = {}, keepShown = {}, keep = {} }
     if not (C_Minimap and C_Minimap.GetNumTrackingTypes and C_Minimap.GetTrackingInfo) then return s end
     for i = 1, C_Minimap.GetNumTrackingTypes() do
         local info = C_Minimap.GetTrackingInfo(i)
@@ -134,8 +161,15 @@ local function Scan()
     for _, e in ipairs(s.list) do e.rank = rank[e.key] or (100000 + e.index) end
     table.sort(s.list, function(a, b) return a.rank < b.rank end)
     for _, e in ipairs(s.list) do
+        e.skipped = Skipped(e.key)
         if InRotation(e.key) then
-            if e.alongside then s.keep[#s.keep + 1] = e else s.rotation[#s.rotation + 1] = e end
+            if e.alongside then
+                s.keepShown[#s.keepShown + 1] = e
+                if not e.skipped then s.keep[#s.keep + 1] = e end
+            else
+                s.shown[#s.shown + 1] = e
+                if not e.skipped then s.rotation[#s.rotation + 1] = e end
+            end
         end
     end
     -- Which tracker the rotation is on. When several are on at once, the one
@@ -242,11 +276,19 @@ local function Blocker(s)
         local inside, kind = IsInInstance()
         if inside and kind ~= "none" then return "in a dungeon, raid or battleground" end
     end
-    if #s.list < 2 then return "this character knows fewer than two tracking spells" end
-    if #s.rotation < 2 then return "tick at least two trackers to rotate" end
-    if s.other and s.active ~= ownedKey then return s.other .. " is on, and it isn't in the rotation" end
+    if #s.list == 0 then return "this character knows no tracking spells" end
+    if #s.rotation == 0 then
+        if #s.shown > 0 then return "every tracker is left out (right-click an icon to put it back)" end
+        return "tick the trackers to rotate in the options"
+    end
+    if s.other and s.active ~= ownedKey and s.active ~= placedKey then
+        return s.other .. " is on, and it isn't in the rotation"
+    end
     local nextEntry = NextEntry(s)
-    if not nextEntry then return "the other trackers can't be cast right now" end
+    if not nextEntry then
+        if #s.rotation == 1 then return s.rotation[1].name .. " is the only one in the rotation" end
+        return "the other trackers can't be cast right now"
+    end
     -- Key press mode only switches while you press keys anyway.
     if db.onlyMoving and db.method ~= "key" and not Moving() then return "standing still" end
 end
@@ -272,6 +314,7 @@ local function Verify()
     local s = Scan()
     if mutedAt and not s.on[a.target] then Unmute() end
     if s.on[a.target] then
+        placedKey = a.target
         if InRotation(a.target) and not (s.byKey[a.target] and s.byKey[a.target].alongside) then
             currentKey = a.target
         end
@@ -324,7 +367,8 @@ Unmute = function()
 end
 
 local function Cast(e, source)
-    Mute()
+    -- A click or a key press of your own keeps the switch's sound, as feedback.
+    if source ~= "click" and source ~= "binding" then Mute() end
     attempt = { at = GetTime(), target = e.key, name = e.name, source = source }
     local ok, err = pcall(C_Minimap.SetTracking, e.index, true)
     if not ok then Log("SetTracking error: " .. tostring(err)) end
@@ -339,6 +383,50 @@ local function TrySwitch(source)
     Cast(NextEntry(s), source)
     -- Count the try as a switch so a refusal is not repeated every tick.
     lastSwitch = GetTime()
+end
+
+-- Switches to another track. A tracker that is on and in the new track keeps
+-- its turn; otherwise the new track takes over at once.
+local function UseTrack(i, quiet)
+    SelectTrack(i)
+    currentKey = nil
+    local s = Scan()
+    if not (s.active and InRotation(s.active) and not Skipped(s.active)) then lastSwitch = 0 end
+    Log("track: " .. TrackName())
+    if not quiet then Print("track: " .. TrackName()) end
+    if UpdateBar then UpdateBar() end
+    if RefreshOptions then RefreshOptions() end
+end
+
+local function CycleTrack(dir)
+    local n = #db.tracks
+    if n < 2 then
+        Print("there is only one track. Add another in the options.")
+        return
+    end
+    UseTrack((db.track - 1 + dir) % n + 1)
+end
+
+local function NewTrack(name)
+    db.tracks[#db.tracks + 1] = { name = name or ("Track " .. (#db.tracks + 1)), rotation = {}, skipped = {} }
+    UseTrack(#db.tracks, true)
+    Print("new track \"" .. TrackName() .. "\": tick its trackers in the options.")
+end
+
+local function DeleteTrack()
+    if #db.tracks < 2 then return end
+    local gone = TrackName()
+    table.remove(db.tracks, db.track)
+    UseTrack(math.min(db.track, #db.tracks), true)
+    Print("deleted track \"" .. gone .. "\". Now on \"" .. TrackName() .. "\".")
+end
+
+local function RenameTrack(text)
+    text = (text or ""):match("^%s*(.-)%s*$")
+    if text == "" or text == TrackName() then return end
+    db.tracks[db.track].name = text
+    Log("track renamed " .. text)
+    if UpdateBar then UpdateBar() end
 end
 
 -- Death clears tracking. Each character's last tracker is remembered and put
@@ -472,10 +560,12 @@ end
 
 local function OnTrackingChanged()
     local s = Scan()
-    if attempt and not attempt.done and s.on[attempt.target] and InRotation(attempt.target)
-        and s.byKey[attempt.target] and not s.byKey[attempt.target].alongside then
-        currentKey = attempt.target
-        s = Scan()
+    if attempt and not attempt.done and s.on[attempt.target] then
+        placedKey = attempt.target
+        if InRotation(attempt.target) and s.byKey[attempt.target] and not s.byKey[attempt.target].alongside then
+            currentKey = attempt.target
+            s = Scan()
+        end
     end
     local active = s.active
     if mutedAt and attempt and s.on[attempt.target] then C_Timer.After(0.3, Unmute) end
@@ -585,8 +675,9 @@ end
 
 local function StatusText()
     local s = Scan()
-    local names = {}
+    local names, out = {}, {}
     for _, e in ipairs(s.rotation) do names[#names + 1] = e.name end
+    for _, e in ipairs(s.shown) do if e.skipped then out[#out + 1] = e.name end end
     local lines = {
         "Tracking: |cffffffff" .. (s.active and NameOf(s, s.active) or "nothing") .. "|r"
             .. (function()
@@ -599,6 +690,8 @@ local function StatusText()
         "Rotating: |cffffffff" .. (#names > 0 and table.concat(names, ", ") or "nothing") .. "|r",
         "Switches " .. MethodText(),
     }
+    if #out > 0 then table.insert(lines, 3, "Left out: |cff9d9d9d" .. table.concat(out, ", ") .. "|r") end
+    if #db.tracks > 1 then table.insert(lines, 1, "Track: |cffffffff" .. TrackName() .. "|r") end
     local reason = Blocker(s)
     if reason then
         lines[#lines + 1] = "|cffffb040Waiting: " .. reason .. "|r"
@@ -808,6 +901,17 @@ local function MoveHint()
     return db.barLocked and "Right-click: options" or "Drag: move   Right-click: options"
 end
 
+-- Right-click on a tracker's icon: leave it out of the rotation for now, or
+-- put it back.
+local function ToggleSkip(key)
+    if not key then return end
+    db.skipped[key] = (not db.skipped[key]) or nil
+    local s = Scan()
+    Log(NameOf(s, key) .. (db.skipped[key] and " left out" or " put back"))
+    UpdateBar()
+    if RefreshOptions then RefreshOptions() end
+end
+
 local function TrackButton(i)
     if trackButtons[i] then return trackButtons[i] end
     local b = CreateFrame("Button", "ForagerTrackButton" .. i, bar)
@@ -849,12 +953,18 @@ local function TrackButton(i)
     b.count = b.textLayer:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
     b.count:SetPoint("CENTER")
     b:SetScript("OnClick", function(self, button)
-        if button == "RightButton" then SlashCmdList.FORAGER("") elseif self.key then SwitchTo(self.key) end
+        if button == "RightButton" then ToggleSkip(self.key) elseif self.key then SwitchTo(self.key) end
     end)
     Draggable(b)
     Tooltip(b, function(self)
         local s = Scan()
-        return { NameOf(s, self.key), (s.active == self.key) and "|cff7fd96aOn now|r" or "Click: track this now", MoveHint() }
+        local lines = { NameOf(s, self.key) }
+        if s.on[self.key] then lines[#lines + 1] = "|cff7fd96aOn now|r" end
+        if Skipped(self.key) then lines[#lines + 1] = "|cff9d9d9dLeft out of the rotation|r" end
+        if not s.on[self.key] then lines[#lines + 1] = "Left-click: track this now" end
+        lines[#lines + 1] = Skipped(self.key) and "Right-click: put it back in the rotation" or "Right-click: leave it out of the rotation"
+        if not db.barLocked then lines[#lines + 1] = "Drag: move" end
+        return lines
     end)
     trackButtons[i] = b
     if ns.ShapeIcon then ns.ShapeIcon(b) end
@@ -899,6 +1009,23 @@ local function BuildBar()
     pauseButton = p
     ns.pauseButton = p
     if ns.SkinPauseButton then ns.SkinPauseButton(p) end
+
+    -- The track's name above the icons, once there is more than one track.
+    -- Click it for the next track, right-click for the previous one.
+    local label = CreateFrame("Button", "ForagerTrackLabel", bar)
+    label:SetSize(120, 14)
+    label:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, 4)
+    label:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    label.text = label:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label.text:SetPoint("LEFT")
+    label.text:SetJustifyH("LEFT")
+    label:SetScript("OnClick", function(_, button) CycleTrack(button == "RightButton" and -1 or 1) end)
+    Draggable(label)
+    Tooltip(label, function()
+        return { "Track: " .. TrackName(), "Left-click: next track", "Right-click: previous track" }
+    end)
+    label:Hide()
+    bar.trackLabel = label
     LayoutBar(0)
 end
 
@@ -916,8 +1043,8 @@ UpdateBar = function()
     bar:Show()
 
     local entries = {}
-    for _, e in ipairs(s.rotation) do entries[#entries + 1] = e end
-    for _, e in ipairs(s.keep) do entries[#entries + 1] = e end
+    for _, e in ipairs(s.shown) do entries[#entries + 1] = e end
+    for _, e in ipairs(s.keepShown) do entries[#entries + 1] = e end
     for i, e in ipairs(entries) do
         local b = TrackButton(i)
         if b.key ~= e.key then
@@ -938,6 +1065,13 @@ UpdateBar = function()
         local e = s.byKey[b.key]
         local on
         if e and e.alongside then on = s.on[b.key] == true else on = s.active == b.key end
+        -- Left out of the rotation: greyed and dimmed, still clickable.
+        local out = e and e.skipped or false
+        if b.out ~= out then
+            b.out = out
+            b.icon:SetDesaturated(out)
+            b.icon:SetAlpha(out and 0.45 or 1)
+        end
         if on ~= b.lit then
             b.lit = on
             -- Forager_Skins.lua fades the glow in and out, and swaps in a round
@@ -977,6 +1111,17 @@ UpdateBar = function()
         ns.UpdateSparkles(active)
     end
 
+    -- The track's name, when there is more than one to switch between.
+    local label = bar.trackLabel
+    if label then
+        local many = #db.tracks > 1
+        label:SetShown(many)
+        if many then
+            label.text:SetText(TrackName())
+            label:SetWidth(math.max(40, (label.text:GetStringWidth() or 0) + 6))
+        end
+    end
+
     -- Running: stop art pauses it. Paused: play art resumes it.
     local p = pauseButton
     p.icon:SetDesaturated(not db.enabled)
@@ -993,7 +1138,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 870
+local W, CONTENT_H = 680, 900
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1118,6 +1263,70 @@ local function OrderArrow(parent, side, tip, keyOf, dir)
     return b
 end
 
+-- Which track the list below edits, with buttons to add and delete tracks
+-- and a box to rename the one on show.
+local function TrackSection(parent, x, y)
+    local pick = TryCreate("Button", "ForagerTrackPick", parent, { "UIPanelButtonTemplate" })
+    pick:SetSize(150, 22)
+    pick:SetPoint("TOPLEFT", x + 2, y)
+    pick:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    pick:SetScript("OnClick", function(_, mouse) CycleTrack(mouse == "RightButton" and -1 or 1) end)
+    pick:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Track: " .. TrackName(), 1, 1, 1)
+        GameTooltip:AddLine("A track is a set of trackers to rotate. Switch tracks here, with the name above the icons, or with a key binding.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Left-click: next track   Right-click: previous", 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+    end)
+    pick:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    PanelButton(parent, "New", x + 154, y, 60, function() NewTrack() end)
+    local del = PanelButton(parent, "Delete", x + 218, y, 80, nil)
+    local armedAt -- a second click within 3 s deletes, so one stray click can't
+    del:SetScript("OnClick", function(self)
+        if armedAt and GetTime() - armedAt < 3 then
+            armedAt = nil
+            DeleteTrack()
+        else
+            armedAt = GetTime()
+            self:SetText("Sure?")
+            C_Timer.After(3, function()
+                if armedAt and GetTime() - armedAt >= 3 then
+                    armedAt = nil
+                    RefreshOptions()
+                end
+            end)
+        end
+    end)
+
+    local nameLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    nameLabel:SetPoint("TOPLEFT", x + 4, y - 32)
+    nameLabel:SetText("Name")
+    -- No auto focus: an edit box with the focus takes every key press.
+    local box = TryCreate("EditBox", "ForagerTrackName", parent, { "InputBoxTemplate" })
+    box:SetSize(190, 20)
+    box:SetPoint("TOPLEFT", x + 52, y - 28)
+    box:SetAutoFocus(false)
+    if box.SetMaxLetters then box:SetMaxLetters(30) end
+    box:SetScript("OnEnterPressed", function(self) RenameTrack(self:GetText()) self:ClearFocus() RefreshOptions() end)
+    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() RefreshOptions() end)
+    box:SetScript("OnEditFocusLost", function(self) RenameTrack(self:GetText()) end)
+
+    local hint = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hint:SetPoint("TOPLEFT", x + 4, y - 56)
+    hint:SetWidth(COL - 20)
+    hint:SetJustifyH("LEFT")
+    hint:SetText("Tick a tracker to put it on the icons. On the icons, right-click one to leave it out of the rotation for now, and again to put it back.")
+
+    optionRefreshers[#optionRefreshers + 1] = function()
+        local n = #db.tracks
+        pick:SetText(TrackName() .. (n > 1 and (" (" .. db.track .. "/" .. n .. ")") or ""))
+        if not armedAt then del:SetText("Delete") end
+        del:SetEnabled(n > 1)
+        if not (box.HasFocus and box:HasFocus()) then box:SetText(TrackName()) end
+    end
+end
+
 -- One row per tracking spell the character knows: tick it to rotate it, and
 -- move it up or down to set the order.
 local function TrackerList(parent, x, y)
@@ -1152,7 +1361,8 @@ local function TrackerList(parent, x, y)
             end
             row.key = e.key
             row.icon:SetTexture(e.texture or ICON)
-            row.label:SetText(e.name .. (e.alongside and "  |cff9d9d9d(kept on)|r" or "") .. (e.active and "  |cff7fd96a(on)|r" or ""))
+            row.label:SetText(e.name .. (e.alongside and "  |cff9d9d9d(kept on)|r" or "")
+                .. (e.skipped and "  |cff9d9d9d(left out)|r" or "") .. (e.active and "  |cff7fd96a(on)|r" or ""))
             row:SetChecked(InRotation(e.key))
             row:Show()
             row.up:Show()
@@ -1453,8 +1663,9 @@ local function BuildContent()
     Header(c, "Look", LEFT, -300)
     LookSection(c, LEFT, -326)
 
-    Header(c, "Trackers to rotate", LEFT, -450)
-    TrackerList(c, LEFT, -476)
+    Header(c, "Tracks and trackers", LEFT, -450)
+    TrackSection(c, LEFT, -476)
+    TrackerList(c, LEFT, -566)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
@@ -1755,12 +1966,14 @@ BINDING_HEADER_FORAGER = "Forager"
 BINDING_NAME_FORAGER_TOGGLE = "Pause / resume"
 BINDING_NAME_FORAGER_SWITCH = "Switch to the next tracker"
 BINDING_NAME_FORAGER_OPTIONS = "Open options"
+BINDING_NAME_FORAGER_NEXTTRACK = "Next track"
 function Forager_Toggle() Toggle() end
+function Forager_NextTrack() CycleTrack(1) end
 function Forager_SwitchNow()
     local s = Scan()
     local e = NextEntry(s)
     if e then SwitchTo(e.key, "binding")
-    else Print("tick at least two trackers to rotate.") end
+    else Print("nothing else in the rotation to switch to.") end
 end
 function Forager_Options() ToggleOptions() end
 
@@ -1831,6 +2044,29 @@ SlashCmdList.FORAGER = function(msg)
         Print((cmd == "minimap" and "minimap button " or "tracker icons ") .. (db[key] and "shown" or "hidden"))
     elseif cmd == "switch" then
         Forager_SwitchNow()
+    elseif cmd == "track" then
+        local raw = (msg or ""):match("^%s*%S+%s*(.-)%s*$") or ""
+        if arg == "" or arg == "next" then
+            CycleTrack(1)
+        elseif arg == "prev" or arg == "previous" then
+            CycleTrack(-1)
+        elseif arg:match("^new") then
+            local name = raw:match("^%S+%s+(.+)$")
+            NewTrack(name)
+        elseif tonumber(arg) and db.tracks[tonumber(arg)] then
+            UseTrack(tonumber(arg))
+        else
+            local found
+            for i, t in ipairs(db.tracks) do
+                if t.name:lower():find(arg, 1, true) then found = i break end
+            end
+            if found then UseTrack(found)
+            else
+                local names = {}
+                for i, t in ipairs(db.tracks) do names[#names + 1] = i .. ". " .. t.name end
+                Print("tracks: " .. table.concat(names, ", ") .. ". /forager track next, previous, a number, a name, or new <name>.")
+            end
+        end
     elseif cmd == "move" then
         local name, way = arg:match("^(.-)%s+(%a+)$")
         local dir = way == "up" and -1 or way == "down" and 1 or nil
@@ -1942,7 +2178,15 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         for k, v in pairs(DEFAULTS) do
             if db[k] == nil then db[k] = v end
         end
-        db.rotation = db.rotation or { [HERBS] = true, [MINERALS] = true }
+        -- Tracks (1.10.0): what was ticked before becomes the first track.
+        if type(db.tracks) ~= "table" or #db.tracks == 0 then
+            db.tracks = { {
+                name = "Track 1",
+                rotation = db.rotation or { [HERBS] = true, [MINERALS] = true },
+                skipped = {},
+            } }
+        end
+        SelectTrack(db.track or 1)
         db.order = db.order or {}
         db.lastTracked = db.lastTracked or {}
         -- Sound left muted by a reload in the middle of a switch.
@@ -1992,6 +2236,9 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         if RefreshOptions then RefreshOptions() end
     elseif event == "PLAYER_LOGOUT" then
         Unmute()
+        -- They point at the current track's tables; saved, they would be
+        -- written out a second time.
+        db.rotation, db.skipped = nil, nil
     elseif event == "PLAYER_DEAD" then
         deathAt, aliveAt = GetTime(), nil
         Log("died; tracker to restore: " .. tostring(db.lastTracked[UnitGUID("player") or ""]))

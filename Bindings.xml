@@ -2,4 +2,5 @@
 	<Binding name="FORAGER_TOGGLE" header="FORAGER" category="ADDONS">Forager_Toggle()</Binding>
 	<Binding name="FORAGER_SWITCH" category="ADDONS">Forager_SwitchNow()</Binding>
 	<Binding name="FORAGER_OPTIONS" category="ADDONS">Forager_Options()</Binding>
+	<Binding name="FORAGER_NEXTTRACK" category="ADDONS">Forager_NextTrack()</Binding>
 </Bindings>
