@@ -323,6 +323,15 @@ local function Due()
     return GetTime() - lastSwitch >= db.delay
 end
 
+-- Says why Forager fell back from the timer, once: a fallback found again
+-- after a reload stays quiet. Cleared when the timer works again.
+local function TellOnce(reason, message)
+    db.told = db.told or {}
+    if db.told[reason] then return end
+    db.told[reason] = true
+    Print(message)
+end
+
 -- A switch that landed, whenever it did.
 local function Landed(a, s, late)
     a.landed = true
@@ -336,6 +345,7 @@ local function Landed(a, s, late)
         if db.method == "key" then Log("the timer works again: back from key presses") end
         db.method = "timer"
         db.methodWhy = nil
+        db.told = nil
         Log("method learned: timer")
     end
     Log("switched to " .. a.name .. " (" .. a.source .. ")" .. (late and ", landed late" or ""))
@@ -357,14 +367,11 @@ local function LateVerdict(a)
     silentFails = silentFails + 1
     Log("switch to " .. a.name .. " (" .. a.source .. ") did not take, now " .. NameOf(s, s.active) .. ", " .. silentFails .. " in a row")
     if a.source == "timer" and silentFails >= 3 then
-        local again = db.methodWhy == "silent"
         db.method = "key"
         db.methodWhy = "silent"
         silentFails = 0
         Log("method learned: key (timer switches never took)")
-        if not again then
-            Print("switches from a timer didn't take three times in a row, so Forager will switch on your next key press after the delay. /forager retest tries the timer again.")
-        end
+        TellOnce("silent", "switches from a timer didn't take three times in a row, so Forager will switch on your next key press after the delay, until you reload. /forager retest tries the timer again now.")
         SetUpKeys()
     end
     if RefreshOptions then RefreshOptions() end
@@ -646,13 +653,13 @@ local function OnRefused(event, addon)
         db.method = "key"
         db.methodWhy = "blocked"
         Log("method learned: key")
-        Print("the game only allows switching tracking during a key press, so Forager will switch on your next key press after the delay.")
+        TellOnce("blocked", "the game only allows switching tracking during a key press, so Forager will switch on your next key press after the delay, until you reload.")
         SetUpKeys()
     elseif a.source == "key" then
         db.method = "none"
-        db.methodWhy = "blocked"
+        db.methodWhy = "refused"
         Log("method learned: none")
-        Print("the game refuses addon tracking switches altogether, so Forager can't switch for you. /forager retest tries again.")
+        TellOnce("refused", "the game refuses addon tracking switches altogether, so Forager can't switch for you until you reload. /forager retest tries again now.")
     end
     if RefreshOptions then RefreshOptions() end
 end
@@ -689,9 +696,19 @@ end
 local keyFrame
 local keysReady = false
 
+-- Keys that never make a switch in key press mode: the modifiers on their
+-- own, Tab (targeting), Escape, Enter (chat) and Caps Lock.
+local NO_SWITCH_KEYS = {
+    LSHIFT = true, RSHIFT = true, LCTRL = true, RCTRL = true, LALT = true, RALT = true,
+    LMETA = true, RMETA = true, TAB = true, ESCAPE = true, ENTER = true, CAPSLOCK = true,
+}
+
 local function OnKey(_, key)
     if db.method ~= "key" then return end
     if GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus() then return end
+    if NO_SWITCH_KEYS[key] then return end
+    -- Nor does a key pressed with Ctrl, Alt or Shift held: those are shortcuts.
+    if IsControlKeyDown() or IsAltKeyDown() or IsShiftKeyDown() then return end
     if db.skipAbilityKeys and IsAbilityKey(key) then return end
     TrySwitch("key")
 end
@@ -746,8 +763,8 @@ local function StatusText()
         "Rotating: |cffffffff" .. (#names > 0 and table.concat(names, ", ") or "nothing") .. "|r",
         "Switches " .. MethodText(),
     }
-    if db.method == "key" or db.method == "none" then
-        lines[#lines + 1] = "|cff9d9d9dTry the timer again: /forager retest, or the button in the options|r"
+    if (db.method == "key" or db.method == "none") and db.methodWhy ~= "user" then
+        lines[#lines + 1] = "|cff9d9d9dTry the timer again: /forager retest, the button in the options, or /reload|r"
     end
     if #out > 0 then table.insert(lines, 3, "Left out: |cff9d9d9d" .. table.concat(out, ", ") .. "|r") end
     if #db.tracks > 1 then table.insert(lines, 1, "Track: |cffffffff" .. TrackName() .. "|r") end
@@ -1408,7 +1425,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 1040
+local W, CONTENT_H = 680, 1080
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1538,6 +1555,55 @@ local function OrderArrow(parent, side, tip, keyOf, dir)
     end)
     b:SetScript("OnLeave", function() GameTooltip:Hide() end)
     return b
+end
+
+-- "Switch only on key presses": ticked whenever key press mode is on. Forager
+-- ticks it itself when the game refuses the timer, and says so underneath;
+-- that lasts until the next reload. Ticked by hand it is a setting and stays.
+-- Unticking goes back to the timer at once.
+local KEY_NOTES = {
+    blocked = "Turned on by Forager: the game refused switching on a timer. Off again at your next reload.",
+    silent = "Turned on by Forager: switches on a timer didn't take. Off again at your next reload.",
+    refused = "Turned on by Forager: the game refuses addon switches, even on key presses. Off again at your next reload.",
+}
+
+local function KeyOnlyCheck(parent, x, y)
+    local cb = CheckButton(parent, "Switch only on key presses")
+    cb:SetPoint("TOPLEFT", x, y)
+    local note = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    note:SetPoint("TOPLEFT", x + 28, y - 22)
+    note:SetWidth(COL - 36)
+    note:SetJustifyH("LEFT")
+    note:SetTextColor(1, 0.69, 0.25)
+    cb:SetScript("OnClick", function(self)
+        if self:GetChecked() then
+            db.method, db.methodWhy = "key", "user"
+            SetUpKeys()
+            Log("key press mode chosen in the options")
+        else
+            db.method, db.methodWhy, db.told = nil, nil, nil
+            silentFails = 0
+            Log("key press mode turned off in the options: back to the timer")
+        end
+        RefreshOptions()
+        UpdateBar()
+    end)
+    cb:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Switch only on key presses", 1, 1, 1)
+        GameTooltip:AddLine("Forager normally switches on a timer. Ticked, it switches only when you press a key after the delay, never on its own.", nil, nil, nil, true)
+        GameTooltip:AddLine("Ability keys, Tab, Escape, Enter and the modifier keys never switch, nor does any key pressed with Ctrl, Alt or Shift held.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Forager ticks it by itself if the game refuses switches on a timer, and unticks it at your next reload. Ticked by you, it stays.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    optionRefreshers[#optionRefreshers + 1] = function()
+        cb:SetChecked(db.method == "key" or db.method == "none")
+        local text = (db.method == "key" or db.method == "none") and KEY_NOTES[db.methodWhy or ""] or nil
+        note:SetText(text or "")
+        note:SetShown(text ~= nil)
+    end
+    ns.keyOnlyCheck, ns.keyOnlyNote = cb, note
 end
 
 -- How the tracks' rows line up: left or right, or top or bottom when the
@@ -1984,16 +2050,17 @@ local function BuildContent()
     OptionCheck(c, "Quiet switches (mutes sound effects briefly)", "quiet", LEFT, -210, function()
         if not db.quiet then Unmute() end
     end)
-    OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", LEFT, -236)
-    OptionCheck(c, "Restore tracking after death", "restoreAfterDeath", LEFT, -262)
+    KeyOnlyCheck(c, LEFT, -236)
+    OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", LEFT, -276)
+    OptionCheck(c, "Restore tracking after death", "restoreAfterDeath", LEFT, -302)
 
     -- Above the tracker list, whose length depends on the character.
-    Header(c, "Look", LEFT, -300)
-    LookSection(c, LEFT, -326)
+    Header(c, "Look", LEFT, -340)
+    LookSection(c, LEFT, -366)
 
-    Header(c, "Tracks and trackers", LEFT, -450)
-    TrackSection(c, LEFT, -476)
-    TrackerList(c, LEFT, -706)
+    Header(c, "Tracks and trackers", LEFT, -490)
+    TrackSection(c, LEFT, -516)
+    TrackerList(c, LEFT, -746)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
@@ -2033,7 +2100,7 @@ local function BuildContent()
     status:SetSpacing(3)
     optionRefreshers[#optionRefreshers + 1] = function() status:SetText(StatusText()) end
     PanelButton(c, "Try the timer again", RIGHT, -792, 160, function()
-        db.method, db.methodWhy = nil, nil
+        db.method, db.methodWhy, db.told = nil, nil, nil
         silentFails = 0
         Log("method reset from options")
         RefreshOptions()
@@ -2413,6 +2480,18 @@ SlashCmdList.FORAGER = function(msg)
         Print((cmd == "minimap" and "minimap button " or "tracker icons ") .. (db[key] and "shown" or "hidden"))
     elseif cmd == "switch" then
         Forager_SwitchNow()
+    elseif cmd == "keys" then
+        if arg == "on" or (arg == "" and db.method ~= "key") then
+            db.method, db.methodWhy = "key", "user"
+            SetUpKeys()
+            Print("switching only on key presses.")
+        else
+            db.method, db.methodWhy, db.told = nil, nil, nil
+            silentFails = 0
+            Print("switching on the timer.")
+        end
+        RefreshOptions()
+        UpdateBar()
     elseif cmd == "rows" then
         if arg == "apart" or arg == "unlock" then db.tracksApart = true
         elseif arg == "together" or arg == "join" then db.tracksApart = false
@@ -2486,7 +2565,7 @@ SlashCmdList.FORAGER = function(msg)
             Print(found.name .. " is already at the " .. (dir < 0 and "top" or "bottom") .. ".")
         end
     elseif cmd == "retest" then
-        db.method, db.methodWhy = nil, nil
+        db.method, db.methodWhy, db.told = nil, nil, nil
         silentFails = 0
         Log("method reset by /forager retest")
         Print("trying the timer again")
@@ -2589,12 +2668,13 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         db.lastTracked = db.lastTracked or {}
         -- Sound left muted by a reload in the middle of a switch.
         if db.unmuteSFX then Unmute() end
-        -- Key press mode the game didn't ask for gets another try at the timer:
-        -- once for a mode saved before 1.12.3 (most likely by the old Find Treasure
-        -- bug or a slow server), and at each login when switches merely seemed
-        -- ignored. A real refusal ("blocked") stays until /forager retest.
-        if db.method == "key" and db.methodWhy ~= "blocked" then
-            ns.retimed = db.methodWhy == nil and "old" or "silent"
+        -- Every reload and login starts on the timer: key press mode, and
+        -- "refused altogether", last only for the session that found them. A
+        -- real refusal is found again at the first switch, and its message isn't
+        -- repeated (db.told). A mode saved before 1.12.3 (most likely by the old
+        -- Find Treasure bug or a slow server) also gets a note in chat once.
+        if (db.method == "key" or db.method == "none") and db.methodWhy ~= "user" then
+            ns.retimed = db.methodWhy == nil and "old" or db.methodWhy
             db.method = nil
         end
         db.barPoint = nil -- 1.1.0 kept the position in another form

@@ -101,6 +101,7 @@ function Frame:SetPropagateKeyboardInput(on) if T.combat then error("protected")
 function Frame:CreateAnimationGroup() local a = setmetatable({ scripts = {}, events = {} }, Frame) T.anims[#T.anims + 1] = a return a end
 function Frame:CreateAnimation() return setmetatable({ scripts = {}, events = {} }, Frame) end
 function Frame:SetShown(on) self.shown = on end
+function Frame:SetChecked(v) self.checked = v and true or false end
 function Frame:Play() self.playing = true end
 function Frame:IsPlaying() return rawget(self, "playing") == true end
 function Frame:SetOffset(x, y) self.offset = { x, y } end
@@ -1547,7 +1548,7 @@ if (!EUI_ON) {
     UIParent.GetHeight = function() return 768 end
   ` + OPEN + `
     local scale = rawget(ForagerOptions, "scale")
-    check(scale and math.abs(scale - (768 - 40) / (1040 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
+    check(scale and math.abs(scale - (768 - 40) / (1080 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
   `);
   run('drawn sparkles follow the size and intensity', SPARK_HELPERS + `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -1722,7 +1723,7 @@ if (!EUI_ON) {
     local lowest, rows = 0, 0
     for _, f in ipairs(T.frames) do
       local p = rawget(f, "_point")
-      if p and rawget(f, "parent") == content and p[2] == 12 and p[3] <= -706 then
+      if p and rawget(f, "parent") == content and p[2] == 12 and p[3] <= -746 then
         rows = rows + 1
         lowest = math.min(lowest, p[3] - 24)
       end
@@ -2266,21 +2267,76 @@ run('key press mode saved by an older version is retried once, with a note', PRI
   T.advance(8)
   check(ForagerDB.method == "timer", "switching on the timer: " .. tostring(ForagerDB.method))
 `);
-run('a real refusal stays in key press mode', PRINTED + `
-  ForagerDB.method = "key" ForagerDB.methodWhy = "blocked"
-  T.fire("ADDON_LOADED", "Forager")
-  check(ForagerDB.method == "key", "kept: " .. tostring(ForagerDB.method))
+run('every reload starts on the timer, even after a real refusal, without repeating the message', PRINTED + `
   T.blockTimer = true
-  ForagerDB.method = nil ForagerDB.methodWhy = nil
   T.advance(7)
-  check(ForagerDB.method == "key" and ForagerDB.methodWhy == "blocked", "a block is remembered as one")
+  check(ForagerDB.method == "key" and ForagerDB.methodWhy == "blocked", "refused: key press mode")
+  check(T.printed("only allows switching"), "told once")
+  T.prints = {}
+  T.fire("ADDON_LOADED", "Forager")
+  check(ForagerDB.method == nil, "the next load starts on the timer")
+  T.advance(7)
+  check(ForagerDB.method == "key", "found the refusal again")
+  check(not T.printed("only allows switching"), "without saying it again")
+  T.blockTimer = false
+  T.fire("ADDON_LOADED", "Forager")
+  T.advance(8)
+  check(ForagerDB.method == "timer" and ForagerDB.told == nil, "the timer works: back on it, and a new refusal would be told again")
+  ForagerDB.method = "none" ForagerDB.methodWhy = "refused"
+  T.fire("ADDON_LOADED", "Forager")
+  check(ForagerDB.method == nil, "refused altogether is cleared at load too")
+  ForagerDB.method = "key" ForagerDB.methodWhy = "blocked"
   SlashCmdList.FORAGER("retest")
-  check(ForagerDB.method == nil and ForagerDB.methodWhy == nil, "retest clears it")
+  check(ForagerDB.method == nil and ForagerDB.methodWhy == nil and ForagerDB.told == nil, "retest clears it")
 `);
 run('in key press mode the status says how to get the timer back', PRINTED + `
   ForagerDB.method = "key" ForagerDB.methodWhy = "blocked"
   SlashCmdList.FORAGER("debug")
   check(T.printed("next key press") and T.printed("/forager retest"), "the hint is shown")
+`);
+run('the key press checkbox shows when Forager turned it on, and unticking goes back to the timer', PRINTED + OPEN + `
+  local cb, note = NS.keyOnlyCheck, NS.keyOnlyNote
+  check(cb ~= nil, "the checkbox is there")
+  check(not rawget(cb, "checked"), "off while the timer runs")
+  T.blockTimer = true
+  T.advance(7)
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(cb, "checked") == true, "ticked when Forager falls back")
+  check(rawget(note, "text"):find("refused switching on a timer", 1, true) ~= nil, "and says why: " .. tostring(rawget(note, "text")))
+  T.blockTimer = false
+  cb.checked = false cb.scripts.OnClick(cb)
+  check(ForagerDB.method == nil, "unticked: back to the timer")
+  T.advance(8)
+  check(ForagerDB.method == "timer", "and switching on it")
+`);
+run('ticked by hand, key press mode is a setting that survives a reload', PRINTED + OPEN + `
+  local cb, note = NS.keyOnlyCheck, NS.keyOnlyNote
+  cb.checked = true cb.scripts.OnClick(cb)
+  check(ForagerDB.method == "key" and ForagerDB.methodWhy == "user", "chosen")
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(note, "shown") == false, "no 'turned on by Forager' note")
+  T.fire("ADDON_LOADED", "Forager")
+  check(ForagerDB.method == "key", "kept after a reload")
+  SlashCmdList.FORAGER("debug")
+  check(not T.printed("Try the timer again"), "no hint to undo your own choice")
+  SlashCmdList.FORAGER("keys off")
+  check(ForagerDB.method == nil, "/forager keys off goes back to the timer")
+`);
+run('key press mode ignores modifiers, Tab, Escape, Enter and keys pressed with a modifier held', `
+  ForagerDB.method = "key" ForagerDB.methodWhy = "user"
+  T.fire("PLAYER_REGEN_ENABLED") -- sets up the key listener
+  T.advance(7)
+  local n = T.switches or 0
+  for _, k in ipairs({ "LSHIFT", "RSHIFT", "LCTRL", "RCTRL", "LALT", "RALT", "TAB", "ESCAPE", "ENTER", "CAPSLOCK" }) do
+    T.key(k)
+  end
+  check((T.switches or 0) == n, "none of them switched")
+  IsShiftKeyDown = function() return true end
+  T.key("W")
+  check((T.switches or 0) == n, "not with Shift held")
+  IsShiftKeyDown = function() return false end
+  T.key("W")
+  check((T.switches or 0) == n + 1, "a plain key does")
 `);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

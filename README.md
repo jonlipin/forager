@@ -19,7 +19,7 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
   - Never switches in combat, while dead, on a flight path, while you're casting or gathering, or while the loot window is open.
   - Quiet: each switch has its own sound, so sound effects are muted for a moment around each one (optional).
   - Pauses in cities and inns, and in dungeons, raids and battlegrounds (both optional).
-  - Can switch only while you're moving.
+  - Can switch only while you're moving, or only when you press a key (never on modifier keys, Tab, Escape or Enter).
   - Picked a tracker yourself that isn't in the rotation? Forager leaves it on until you switch back.
 - **Restores tracking after death.** Dying clears your tracking. Forager remembers what each character was tracking and turns it back on as soon as you're alive again, even with the rotation paused.
 - **Skips trackers that can't be cast right now.** For example a druid's Track Humanoids outside Cat Form is skipped for a minute instead of failing over and over.
@@ -60,7 +60,7 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
 
 ## How the switching works
 
-Forager uses the same call as the game's own tracking menu. If the game ever stops addons from switching tracking on a timer, Forager notices, tells you once, and switches on your next key press after the delay instead. It never acts on keys bound to abilities, and every key still reaches the game.
+Forager uses the same call as the game's own tracking menu. If the game ever stops addons from switching tracking on a timer, Forager notices, tells you once, and switches on your next key press after the delay instead, until your next reload or login, when it tries the timer again. It never acts on keys bound to abilities, and every key still reaches the game.
 
 ## Install
 
