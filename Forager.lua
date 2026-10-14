@@ -37,7 +37,10 @@ local DEFAULTS = {
     swapFishing = true,    -- fishing pole equipped: Find Fish
     swapCatForm = true,    -- Cat Form: Track Humanoids
     swapHunterPvP = true,
-    showAllTracks = true,  -- a row of icons for every track, not just the current one  -- hunter in a battleground or arena: Track Humanoids
+    showAllTracks = true,  -- a row of icons for every track, not just the current one
+    trackAlign = "start",  -- rows line up on the left (columns at the top), "center" or "end"
+    trackGap = 12,         -- space between the tracks' rows (or columns), in pixels
+    tracksApart = false,   -- each track's row moves on its own, saved per track  -- hunter in a battleground or arena: Track Humanoids
     style = "auto",        -- window style: "auto", "blizzard" or "dark" (Styles.lua)
     darkAlpha = 0.92,      -- the Dark style's background opacity
     sparkles = true,       -- sparkles round the active tracker's border
@@ -868,30 +871,86 @@ end
 -- Lays out every row on show: its track's name, its tracker buttons and its
 -- play / stop button. Rows stack downward, or sit side by side when the icons
 -- are stacked vertically. One track alone looks as it always did.
+-- Every track's row moves on its own (with more than one row on show).
+local function RowsApart()
+    return db.tracksApart and db.showAllTracks and #db.tracks > 1
+end
+
+-- A row dragged on its own keeps its center, in UIParent units like the bar's.
+local function SaveRowPosition(slot)
+    local t = db.tracks[slot.track]
+    if not t then return end
+    local x, y = slot.row:GetCenter()
+    if not x then return end
+    local scale = bar:GetScale()
+    t.pos = { x * scale, y * scale }
+end
+
 local function LayoutBar()
     if not bar then return end
     bar:SetScale((db.barScale or 100) / 100)
     local views = barViews
     local named = #db.tracks > 1
     local LH = named and 16 or 0
-    local across, down = 0, 0
+    local gap = db.trackGap or 12
+    local align = db.trackAlign or "start"
+    -- First the size of every row, then the bar's size, then where each row
+    -- goes: rows of different lengths line up on one side (top or bottom
+    -- for columns).
+    local longs, across, down, count = {}, 0, 0, 0
+    for j in ipairs(slots) do
+        local v = views[j]
+        if v then
+            count = count + 1
+            local long = SIZE * (v.count + 1) + GAP * v.count
+            longs[j] = long
+            if db.barVertical then
+                across = across + SIZE + (count > 1 and gap or 0)
+                down = math.max(down, long + LH)
+            else
+                down = down + SIZE + LH + (count > 1 and gap or 0)
+                across = math.max(across, long)
+            end
+        end
+    end
+    bar:SetSize(math.max(across, SIZE), math.max(down, SIZE))
+
+    -- How far a row of length `long` sits from the line-up side's start.
+    local room = db.barVertical and (math.max(down, SIZE) - LH) or math.max(across, SIZE)
+    local function Shift(long)
+        if align == "end" then return room - long end
+        if align == "center" then return (room - long) / 2 end
+        return 0
+    end
+    local at = 0
     for j, slot in ipairs(slots) do
         local v = views[j]
         slot.row:SetShown(v ~= nil)
         if v then
-            local n = v.count
-            local long = SIZE * (n + 1) + GAP * n
+            local n, long = v.count, longs[j]
             slot.row:ClearAllPoints()
+            slot.label:ClearAllPoints()
+            local own = RowsApart() and db.tracks[slot.track] and db.tracks[slot.track].pos
             if db.barVertical then
                 slot.row:SetSize(SIZE, long)
-                slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", across, -LH)
-                across = across + SIZE + (j < #views and GAP * 3 or 0)
-                down = math.max(down, long + LH)
+                slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", at, -(LH + Shift(long)))
+                slot.label:SetPoint("BOTTOMLEFT", slot.row, "TOPLEFT", 0, 3)
+                at = at + SIZE + gap
             else
                 slot.row:SetSize(long, SIZE)
-                slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, -(down + LH))
-                down = down + SIZE + LH + (j < #views and GAP * 2 or 0)
-                across = math.max(across, long)
+                slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", Shift(long), -(at + LH))
+                -- The name sits over the row's lined-up side.
+                if align == "end" and not own then slot.label:SetPoint("BOTTOMRIGHT", slot.row, "TOPRIGHT", 0, 3)
+                elseif align == "center" and not own then slot.label:SetPoint("BOTTOM", slot.row, "TOP", 0, 3)
+                else slot.label:SetPoint("BOTTOMLEFT", slot.row, "TOPLEFT", 0, 3) end
+                at = at + SIZE + LH + gap
+            end
+            -- Moved on its own: the row goes where it was left. Until it is
+            -- dragged, it stays where the joined layout put it.
+            if own then
+                local scale = bar:GetScale()
+                slot.row:ClearAllPoints()
+                slot.row:SetPoint("CENTER", UIParent, "BOTTOMLEFT", own[1] / scale, own[2] / scale)
             end
             local function Put(b, i)
                 local offset = (i - 1) * (SIZE + GAP)
@@ -904,28 +963,33 @@ local function LayoutBar()
                 if i <= n then Put(b, i) end
             end
             Put(slot.pause, n + 1)
-            slot.label:ClearAllPoints()
-            slot.label:SetPoint("BOTTOMLEFT", slot.row, "TOPLEFT", 0, 3)
             slot.label:SetShown(named)
         end
     end
-    bar:SetSize(math.max(across, SIZE), math.max(down, SIZE))
     PlaceBar()
 end
 
 local function ResetBarPosition()
     db.barPos = nil
-    if bar then PlaceBar() end
+    for _, t in ipairs(db.tracks) do t.pos = nil end
+    if bar then LayoutBar() end
 end
 
-local function Draggable(button)
+-- Dragging moves the whole bar, or only this button's row when the tracks'
+-- rows move apart.
+local function Draggable(button, slot)
+    local moving
     button:RegisterForDrag("LeftButton")
     button:SetScript("OnDragStart", function()
-        if not db.barLocked then bar:StartMoving() end
+        if db.barLocked then return end
+        moving = (slot and RowsApart()) and slot.row or bar
+        moving:StartMoving()
     end)
     button:SetScript("OnDragStop", function()
-        bar:StopMovingOrSizing()
-        SaveBarPosition()
+        if not moving then return end
+        moving:StopMovingOrSizing()
+        if moving == bar then SaveBarPosition() else SaveRowPosition(slot) LayoutBar() end
+        moving = nil
     end)
 end
 
@@ -1023,7 +1087,7 @@ local function TrackButton(slot, i)
     b:SetScript("OnClick", function(self, button)
         if button == "RightButton" then ToggleSkip(self.key, slot.track) elseif self.key then SwitchTo(self.key) end
     end)
-    Draggable(b)
+    Draggable(b, slot)
     Tooltip(b, function(self)
         local s = Scan()
         local t = SlotTrack(slot)
@@ -1083,7 +1147,7 @@ local function PauseButtonFor(slot)
     p:SetScript("OnClick", function(_, button)
         if button == "RightButton" then SlashCmdList.FORAGER("") else RunSlot(slot) end
     end)
-    Draggable(p)
+    Draggable(p, slot)
     Tooltip(p, function()
         local key = GetBindingKey("FORAGER_TOGGLE")
         local running = slot.track == db.track and db.enabled
@@ -1127,7 +1191,7 @@ local function LabelFor(slot)
             CycleTrack(button == "RightButton" and -1 or 1)
         end
     end)
-    Draggable(label)
+    Draggable(label, slot)
     Tooltip(label, function()
         if ManyRows() then
             local t = SlotTrack(slot)
@@ -1146,6 +1210,8 @@ local function Slot(j)
     if slots[j] then return slots[j] end
     local slot = { index = j, buttons = {} }
     slot.row = CreateFrame("Frame", j == 1 and "ForagerRow1" or ("ForagerRow" .. j), bar)
+    slot.row:SetMovable(true)
+    slot.row:SetClampedToScreen(true)
     slot.label = LabelFor(slot)
     slot.pause = PauseButtonFor(slot)
     slots[j] = slot
@@ -1199,6 +1265,8 @@ UpdateBar = function()
     end
     barViews = views
     local layoutKey = table.concat(shape, ",") .. (db.barVertical and "v" or "h") .. #db.tracks
+        .. (db.trackAlign or "start") .. (db.trackGap or 12) .. (RowsApart() and "apart" or "")
+        .. table.concat(list, ",")
     if barLayoutKey ~= layoutKey then
         barLayoutKey = layoutKey
         LayoutBar()
@@ -1297,7 +1365,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 930
+local W, CONTENT_H = 680, 1040
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1422,6 +1490,49 @@ local function OrderArrow(parent, side, tip, keyOf, dir)
     return b
 end
 
+-- How the tracks' rows line up: left or right, or top or bottom when the
+-- icons are stacked vertically. Left-click for the other side, right-click too.
+local ALIGNS = { "start", "center", "end" }
+local ALIGN_NAMES = {
+    h = { start = "left", center = "centered", ["end"] = "right" },
+    v = { start = "top", center = "centered", ["end"] = "bottom" },
+}
+
+local function AlignText()
+    local names = ALIGN_NAMES[db.barVertical and "v" or "h"]
+    local name = names[db.trackAlign] or names.start
+    if db.barVertical then return "Columns: " .. name .. (name == "centered" and "" or " aligned") end
+    return "Rows: " .. name .. (name == "centered" and "" or " aligned")
+end
+
+local function SetTrackAlign(value)
+    db.trackAlign = (value == "end" or value == "center") and value or "start"
+    UpdateBar()
+    LayoutBar()
+    RefreshOptions()
+end
+
+local function AlignButton(parent, x, y)
+    local b = PanelButton(parent, "", x, y, 176, function(_, mouse)
+        local i = 1
+        for n, a in ipairs(ALIGNS) do if a == db.trackAlign then i = n end end
+        i = (i - 1 + (mouse == "RightButton" and -1 or 1)) % #ALIGNS + 1
+        SetTrackAlign(ALIGNS[i])
+    end)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Track alignment", 1, 1, 1)
+        GameTooltip:AddLine("With the icons side by side, the tracks' rows line up on the left, in the center or on the right. Stacked vertically, the columns line up at the top, in the center or at the bottom.", nil, nil, nil, true)
+        GameTooltip:AddLine("Left-click for the next, right-click for the previous.", 0.6, 0.6, 0.6, true)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    optionRefreshers[#optionRefreshers + 1] = function() b:SetText(AlignText()) end
+    ns.alignButton = b
+    return b
+end
+
 -- Which track the list below edits, with buttons to add and delete tracks
 -- and a box to rename the one on show.
 local function TrackSection(parent, x, y)
@@ -1477,6 +1588,13 @@ local function TrackSection(parent, x, y)
     hint:SetJustifyH("LEFT")
     hint:SetText("Tick a tracker to put it on the icons. On the icons, right-click one to leave it out of the rotation for now, and again to put it back.")
     OptionCheck(parent, "Show every track's icons at once", "showAllTracks", x, y - 86, function() UpdateBar() end)
+    AlignButton(parent, x, y - 118)
+    OptionSlider(parent, "Gap between tracks", "trackGap", 0, 40, x, y - 150, " px", 1, function() LayoutBar() UpdateBar() end)
+    OptionCheck(parent, "Move each track's row on its own", "tracksApart", x, y - 196, function()
+        UpdateBar()
+        LayoutBar()
+        Print(db.tracksApart and "drag each track's row where you want it." or "the tracks' rows move together again.")
+    end)
 
     optionRefreshers[#optionRefreshers + 1] = function()
         local n = #db.tracks
@@ -1825,13 +1943,13 @@ local function BuildContent()
 
     Header(c, "Tracks and trackers", LEFT, -450)
     TrackSection(c, LEFT, -476)
-    TrackerList(c, LEFT, -596)
+    TrackerList(c, LEFT, -706)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
     OptionCheck(c, "Show the tracker icons", "bar", RIGHT, -30, Refresh)
     OptionCheck(c, "Lock them in place", "barLocked", RIGHT, -56, Refresh)
-    OptionCheck(c, "Stack them vertically", "barVertical", RIGHT, -82, function() LayoutBar() end)
+    OptionCheck(c, "Stack them vertically", "barVertical", RIGHT, -82, function() LayoutBar() UpdateBar() RefreshOptions() end)
     OptionCheck(c, "Show the seconds to the next switch", "barCountdown", RIGHT, -108, Refresh)
     OptionCheck(c, "Swipe down to the next switch", "barSwipe", RIGHT, -134, Refresh)
     OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -160, Refresh)
@@ -2204,6 +2322,35 @@ SlashCmdList.FORAGER = function(msg)
         Print((cmd == "minimap" and "minimap button " or "tracker icons ") .. (db[key] and "shown" or "hidden"))
     elseif cmd == "switch" then
         Forager_SwitchNow()
+    elseif cmd == "rows" then
+        if arg == "apart" or arg == "unlock" then db.tracksApart = true
+        elseif arg == "together" or arg == "join" then db.tracksApart = false
+        else db.tracksApart = not db.tracksApart end
+        UpdateBar()
+        LayoutBar()
+        RefreshOptions()
+        Print(db.tracksApart and "each track's row moves on its own." or "the tracks' rows move together.")
+    elseif cmd == "align" then
+        if arg == "left" or arg == "top" then SetTrackAlign("start")
+        elseif arg == "center" or arg == "centre" or arg == "middle" then SetTrackAlign("center")
+        elseif arg == "right" or arg == "bottom" then SetTrackAlign("end")
+        else
+            local i = 1
+            for n, a in ipairs(ALIGNS) do if a == db.trackAlign then i = n end end
+            SetTrackAlign(ALIGNS[i % #ALIGNS + 1])
+        end
+        Print(AlignText())
+    elseif cmd == "gap" then
+        local n = tonumber(arg)
+        if n then
+            db.trackGap = math.max(0, math.min(40, math.floor(n + 0.5)))
+            LayoutBar()
+            UpdateBar()
+            RefreshOptions()
+            Print("gap between tracks: " .. db.trackGap .. " px")
+        else
+            Print("usage: /forager gap <0 to 40>")
+        end
     elseif cmd == "track" then
         local raw = (msg or ""):match("^%s*%S+%s*(.-)%s*$") or ""
         if arg == "" or arg == "next" then

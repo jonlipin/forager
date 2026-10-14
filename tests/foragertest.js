@@ -1538,7 +1538,7 @@ if (!EUI_ON) {
     UIParent.GetHeight = function() return 768 end
   ` + OPEN + `
     local scale = rawget(ForagerOptions, "scale")
-    check(scale and math.abs(scale - (768 - 40) / (930 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
+    check(scale and math.abs(scale - (768 - 40) / (1040 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
   `);
   run('drawn sparkles follow the size and intensity', SPARK_HELPERS + `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -1713,7 +1713,7 @@ if (!EUI_ON) {
     local lowest, rows = 0, 0
     for _, f in ipairs(T.frames) do
       local p = rawget(f, "_point")
-      if p and rawget(f, "parent") == content and p[2] == 12 and p[3] <= -596 then
+      if p and rawget(f, "parent") == content and p[2] == 12 and p[3] <= -706 then
         rows = rows + 1
         lowest = math.min(lowest, p[3] - 24)
       end
@@ -2115,6 +2115,79 @@ run('a tracker in none of your tracks still counts as your own pick', `
   T.fire("MINIMAP_UPDATE_TRACKING")
   local n = T.switches
   T.advance(20) check(T.active() == "Track Beasts" and T.switches == n, "left alone")
+`);
+const TWO_ROWS = `
+  -- Track 1: herbs, minerals and beasts (3 icons); track 2: humanoids only.
+  ForagerDB.rotation[1494] = true
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[5225] = true
+  SlashCmdList.FORAGER("track 1")
+  T.advance(0.5)
+  function T.rowAt(row) local p = rawget(row, "_point") return p[4], p[5], p[1] end
+`
+run('rows line up left, center or right', TWO_ROWS + `
+  -- Row 1: 3 icons and play = 162 px; row 2: 1 icon and play = 78 px.
+  local x = T.rowAt(ForagerRow2) check(x == 0, "left: " .. tostring(x))
+  SlashCmdList.FORAGER("align center") T.advance(0.3)
+  x = T.rowAt(ForagerRow2) check(x == 42, "centered: " .. tostring(x))
+  SlashCmdList.FORAGER("align right") T.advance(0.3)
+  x = T.rowAt(ForagerRow2) check(x == 84, "right: " .. tostring(x))
+  check(T.rowAt(ForagerRow1) == 0, "the longest row stays put")
+  local lp = rawget(ForagerSlot2Label, "_point")
+  check(lp[1] == "BOTTOMRIGHT", "the name sits over the right side: " .. tostring(lp[1]))
+  SlashCmdList.FORAGER("")
+  local b = NS.alignButton
+  b.scripts.OnClick(b, "LeftButton") check(ForagerDB.trackAlign == "start", "button: next wraps to left")
+  b.scripts.OnClick(b, "RightButton") check(ForagerDB.trackAlign == "end", "button: previous is right")
+`);
+run('columns line up top, center or bottom', TWO_ROWS + `
+  ForagerDB.barVertical = true T.advance(0.3)
+  local _, y = T.rowAt(ForagerRow2) check(y == -16, "top: " .. tostring(y))
+  SlashCmdList.FORAGER("align center") T.advance(0.3)
+  _, y = T.rowAt(ForagerRow2) check(y == -58, "centered: " .. tostring(y))
+  SlashCmdList.FORAGER("align bottom") T.advance(0.3)
+  _, y = T.rowAt(ForagerRow2) check(y == -100, "bottom: " .. tostring(y))
+  local x = T.rowAt(ForagerRow2) check(x == 36 + 12, "next column after the gap: " .. tostring(x))
+`);
+run('the gap between tracks', TWO_ROWS + `
+  local _, y = T.rowAt(ForagerRow2) check(y == -80, "default 12 px: " .. tostring(y))
+  SlashCmdList.FORAGER("gap 20") T.advance(0.3)
+  _, y = T.rowAt(ForagerRow2) check(y == -88, "20 px: " .. tostring(y))
+  SlashCmdList.FORAGER("gap 0") T.advance(0.3)
+  _, y = T.rowAt(ForagerRow2) check(y == -68, "none: " .. tostring(y))
+  check(ForagerDB.trackGap == 0, "saved")
+`);
+run('rows moved on their own keep their place; locking and reset still work', TWO_ROWS + `
+  local moved = {}
+  ForagerBar.StartMoving = function() moved.bar = true end
+  ForagerRow2.StartMoving = function() moved.row2 = true end
+  ForagerRow2.GetCenter = function() return 500, 300 end
+  local p2 = ForagerSlot2Pause
+  -- Together: dragging any row moves the whole bar.
+  p2.scripts.OnDragStart(p2) p2.scripts.OnDragStop(p2)
+  check(moved.bar and not moved.row2, "together: the bar moves")
+  moved = {}
+  SlashCmdList.FORAGER("rows apart") T.advance(0.3)
+  check(ForagerDB.tracksApart == true, "apart on")
+  p2.scripts.OnDragStart(p2) p2.scripts.OnDragStop(p2)
+  check(moved.row2 and not moved.bar, "apart: only that row moves")
+  local pos = ForagerDB.tracks[2].pos
+  check(pos and pos[1] == 500 and pos[2] == 300, "row 2's place saved with its track")
+  check(ForagerDB.tracks[1].pos == nil, "row 1 untouched")
+  T.advance(0.3)
+  local p = rawget(ForagerRow2, "_point")
+  check(p[1] == "CENTER" and p[2] == UIParent and p[4] == 500 and p[5] == 300, "row 2 drawn where it was left")
+  moved = {}
+  ForagerDB.barLocked = true
+  p2.scripts.OnDragStart(p2) p2.scripts.OnDragStop(p2)
+  check(not moved.row2 and not moved.bar, "locked: nothing moves")
+  ForagerDB.barLocked = false
+  SlashCmdList.FORAGER("rows together") T.advance(0.3)
+  p = rawget(ForagerRow2, "_point")
+  check(p[2] == ForagerBar, "together again: back in the bar")
+  check(ForagerDB.tracks[2].pos ~= nil, "its own place remembered for next time")
+  SlashCmdList.FORAGER("reset")
+  check(ForagerDB.tracks[2].pos == nil, "reset clears it")
 `);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

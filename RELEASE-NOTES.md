@@ -1,4 +1,7 @@
-## 1.11.1 - 2026-10-14
+## 1.12.0 - 2026-10-14
 
-- Fixed: after a reload, pressing play on another track's row did nothing until you clicked a tracker. The tracker the old track had left on was taken for one you picked yourself, so Forager waited. Now a tracker that is in any of your tracks never counts as your own pick, and the new track takes over at once.
-- A tracker that isn't in any of your tracks is still left alone when you turn it on yourself.
+- Line up the tracks' rows on the left, in the center or on the right. With the icons stacked vertically, the columns line up at the top, in the center or at the bottom. Use the alignment button under Tracks and trackers: left-click for the next, right-click for the previous.
+- New "Gap between tracks" slider (0 to 40 px) for the space between the tracks' rows or columns.
+- New "Move each track's row on its own" option: drag each track's row wherever you want it, by its icons, its play button or its name. Each track remembers its spot. Untick it and the rows join up again, with their spots kept for next time.
+- Locking the icons locks every row, and Reset position puts every row back.
+- New commands: /forager align left, center, right, top or bottom; /forager gap followed by a number; /forager rows apart or together.

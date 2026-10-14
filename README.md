@@ -29,7 +29,7 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
   - Hunter in a battleground or arena: Track Humanoids.
   When the moment passes, the rotation picks up again, or your old tracker comes back if the rotation is paused.
 - **Minimap button.** Shows the tracker that's on. Left-click opens the options, right-click pauses or resumes, drag it around the minimap, or hide it.
-- **Tracks.** Keep several sets of trackers, for example one for gathering and one for hunting. Every track gets its own row of icons on screen, with its name above it and its own play button: press play on a row to run that track, and the one that was running stops. Only one track runs at a time. You can also switch with a key binding or `/forager track`, and show only the current track's row if you prefer. Add, rename and delete tracks in the options.
+- **Tracks.** Keep several sets of trackers, for example one for gathering and one for hunting. Every track gets its own row of icons on screen, with its name above it and its own play button: press play on a row to run that track, and the one that was running stops. Only one track runs at a time. You can also switch with a key binding or `/forager track`, and show only the current track's row if you prefer. Line the rows up left, center or right (top, center or bottom when stacked vertically), set the gap between them, or move each track's row on its own. Add, rename and delete tracks in the options.
 - **Pause key.** Set a key to pause and resume right from Forager's options: click the button, press a key. It warns you if the key already does something else.
 - **Key bindings.** Pause / resume, switch to the next tracker, and open the options, also under Keybindings > AddOns > Forager.
 - **Options page** in the game's own Options > AddOns list.
@@ -47,6 +47,8 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
 - **/forager on**, **/forager off**, **/forager toggle** pause and resume
 - **/forager switch** switches to the next tracker now
 - **/forager move beasts up** moves a tracker up or down in the order
+- **/forager align left**, **center** or **right** (or **top** and **bottom**) lines up the tracks' rows; **/forager gap 12** sets the space between them
+- **/forager rows apart** or **together** lets each track's row move on its own, or joins them again
 - **/forager track** switches to the next track; **/forager track 2** or **/forager track hunting** picks one, and **/forager track new Hunting** adds one
 - **/forager delay 10** sets the time between switches in seconds
 - **/forager icons**, **/forager minimap** show or hide the tracker icons and the minimap button
