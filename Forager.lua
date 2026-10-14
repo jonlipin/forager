@@ -36,7 +36,8 @@ local DEFAULTS = {
     minimapShowsTracker = true, -- the minimap button shows the tracker that is on
     swapFishing = true,    -- fishing pole equipped: Find Fish
     swapCatForm = true,    -- Cat Form: Track Humanoids
-    swapHunterPvP = true,  -- hunter in a battleground or arena: Track Humanoids
+    swapHunterPvP = true,
+    showAllTracks = true,  -- a row of icons for every track, not just the current one  -- hunter in a battleground or arena: Track Humanoids
     style = "auto",        -- window style: "auto", "blizzard" or "dark" (Styles.lua)
     darkAlpha = 0.92,      -- the Dark style's background opacity
     sparkles = true,       -- sparkles round the active tracker's border
@@ -719,8 +720,11 @@ end
 local SIZE, GAP = 36, 6
 ns.ICON_SIZE = SIZE
 local bar, pauseButton
-local trackButtons = {}
+local trackButtons = {}   -- every tracker button in every row (the skins walk them)
 ns.trackButtons = trackButtons
+local slots = {}          -- one row of icons per track on show
+local barViews, barLayoutKey = {}, nil -- what each row holds, and the layout last drawn
+ns.pauseButtons = {}      -- the play / stop button of every row
 local PLAY_ART = { "charactercreate-customize-playbutton", "common-icon-forwardarrow", "CGuy_Play" }
 local STOP_ART = { "charactercreate-customize-stopbutton", "CGuy_Stop" }
 -- The Cooldown Manager's swipe (Range Lens uses it on this client).
@@ -849,24 +853,51 @@ local function PlaceBar()
     else bar:SetPoint("CENTER", UIParent, "CENTER", 0, -180 / scale) end
 end
 
--- Lays out the first `count` tracker buttons and the pause button.
-local function LayoutBar(count)
+-- Lays out every row on show: its track's name, its tracker buttons and its
+-- play / stop button. Rows stack downward, or sit side by side when the icons
+-- are stacked vertically. One track alone looks as it always did.
+local function LayoutBar()
     if not bar then return end
-    count = count or bar.count or 0
-    bar.count = count
     bar:SetScale((db.barScale or 100) / 100)
-    local long = SIZE * (count + 1) + GAP * count
-    if db.barVertical then bar:SetSize(SIZE, long) else bar:SetSize(long, SIZE) end
-    local function Put(b, i)
-        local offset = (i - 1) * (SIZE + GAP)
-        b:ClearAllPoints()
-        if db.barVertical then b:SetPoint("TOP", 0, -offset) else b:SetPoint("LEFT", offset, 0) end
+    local views = barViews
+    local named = #db.tracks > 1
+    local LH = named and 16 or 0
+    local across, down = 0, 0
+    for j, slot in ipairs(slots) do
+        local v = views[j]
+        slot.row:SetShown(v ~= nil)
+        if v then
+            local n = v.count
+            local long = SIZE * (n + 1) + GAP * n
+            slot.row:ClearAllPoints()
+            if db.barVertical then
+                slot.row:SetSize(SIZE, long)
+                slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", across, -LH)
+                across = across + SIZE + (j < #views and GAP * 3 or 0)
+                down = math.max(down, long + LH)
+            else
+                slot.row:SetSize(long, SIZE)
+                slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, -(down + LH))
+                down = down + SIZE + LH + (j < #views and GAP * 2 or 0)
+                across = math.max(across, long)
+            end
+            local function Put(b, i)
+                local offset = (i - 1) * (SIZE + GAP)
+                b:ClearAllPoints()
+                if db.barVertical then b:SetPoint("TOP", slot.row, "TOP", 0, -offset)
+                else b:SetPoint("LEFT", slot.row, "LEFT", offset, 0) end
+            end
+            for i, b in ipairs(slot.buttons) do
+                b:SetShown(i <= n)
+                if i <= n then Put(b, i) end
+            end
+            Put(slot.pause, n + 1)
+            slot.label:ClearAllPoints()
+            slot.label:SetPoint("BOTTOMLEFT", slot.row, "TOPLEFT", 0, 3)
+            slot.label:SetShown(named)
+        end
     end
-    for i, b in ipairs(trackButtons) do
-        b:SetShown(i <= count)
-        if i <= count then Put(b, i) end
-    end
-    Put(pauseButton, count + 1)
+    bar:SetSize(math.max(across, SIZE), math.max(down, SIZE))
     PlaceBar()
 end
 
@@ -903,18 +934,41 @@ end
 
 -- Right-click on a tracker's icon: leave it out of the rotation for now, or
 -- put it back.
-local function ToggleSkip(key)
+local function ToggleSkip(key, trackIndex)
     if not key then return end
-    db.skipped[key] = (not db.skipped[key]) or nil
+    local t = db.tracks[trackIndex or db.track] or db.tracks[db.track]
+    t.skipped[key] = (not t.skipped[key]) or nil
     local s = Scan()
-    Log(NameOf(s, key) .. (db.skipped[key] and " left out" or " put back"))
+    Log(NameOf(s, key) .. (t.skipped[key] and " left out of " or " put back in ") .. t.name)
     UpdateBar()
     if RefreshOptions then RefreshOptions() end
 end
 
-local function TrackButton(i)
-    if trackButtons[i] then return trackButtons[i] end
-    local b = CreateFrame("Button", "ForagerTrackButton" .. i, bar)
+-- The trackers a track shows, in the list's order, the ones kept on
+-- alongside the rotation last.
+local function TrackEntries(s, t)
+    local list, keep = {}, {}
+    for _, e in ipairs(s.list) do
+        if t.rotation[e.key] then
+            if e.alongside then keep[#keep + 1] = e else list[#list + 1] = e end
+        end
+    end
+    for _, e in ipairs(keep) do list[#list + 1] = e end
+    return list
+end
+
+local function SlotTrack(slot)
+    return db.tracks[slot.track] or db.tracks[db.track]
+end
+
+local function ManyRows()
+    return db.showAllTracks and #db.tracks > 1
+end
+
+local function TrackButton(slot, i)
+    if slot.buttons[i] then return slot.buttons[i] end
+    local name = slot.index == 1 and ("ForagerTrackButton" .. i) or ("ForagerSlot" .. slot.index .. "Button" .. i)
+    local b = CreateFrame("Button", name, slot.row)
     b:SetSize(SIZE, SIZE)
     b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     b.icon = DressIcon(b)
@@ -952,32 +1006,49 @@ local function TrackButton(i)
     b.textLayer:SetFrameLevel(b.cd:GetFrameLevel() + 2)
     b.count = b.textLayer:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
     b.count:SetPoint("CENTER")
+    -- Left-click turns the tracker on, whichever row it is in; right-click
+    -- leaves it out of that row's track, or puts it back.
     b:SetScript("OnClick", function(self, button)
-        if button == "RightButton" then ToggleSkip(self.key) elseif self.key then SwitchTo(self.key) end
+        if button == "RightButton" then ToggleSkip(self.key, slot.track) elseif self.key then SwitchTo(self.key) end
     end)
     Draggable(b)
     Tooltip(b, function(self)
         local s = Scan()
+        local t = SlotTrack(slot)
+        local out = t.skipped[self.key] == true
         local lines = { NameOf(s, self.key) }
         if s.on[self.key] then lines[#lines + 1] = "|cff7fd96aOn now|r" end
-        if Skipped(self.key) then lines[#lines + 1] = "|cff9d9d9dLeft out of the rotation|r" end
+        if out then lines[#lines + 1] = "|cff9d9d9dLeft out of the rotation|r" end
+        if ManyRows() then lines[#lines + 1] = "Track: " .. t.name end
         if not s.on[self.key] then lines[#lines + 1] = "Left-click: track this now" end
-        lines[#lines + 1] = Skipped(self.key) and "Right-click: put it back in the rotation" or "Right-click: leave it out of the rotation"
+        lines[#lines + 1] = out and "Right-click: put it back in the rotation" or "Right-click: leave it out of the rotation"
         if not db.barLocked then lines[#lines + 1] = "Drag: move" end
         return lines
     end)
-    trackButtons[i] = b
+    slot.buttons[i] = b
+    trackButtons[#trackButtons + 1] = b
     if ns.ShapeIcon then ns.ShapeIcon(b) end
     return b
 end
 
-local function BuildBar()
-    bar = CreateFrame("Frame", "ForagerBar", UIParent)
-    ns.bar = bar
-    bar:SetMovable(true)
-    bar:SetClampedToScreen(true)
+-- A row's play / stop button. Play runs that row's track and stops the one
+-- that was running, so only one track runs at a time; stop pauses it.
+local function RunSlot(slot)
+    if slot.track == db.track then
+        Toggle()
+        return
+    end
+    UseTrack(slot.track, true)
+    db.enabled = true
+    Print(TrackName() .. " is running")
+    UpdateMinimapButton()
+    UpdateBar()
+    if RefreshOptions then RefreshOptions() end
+end
 
-    local p = CreateFrame("Button", "ForagerPauseButton", bar)
+local function PauseButtonFor(slot)
+    local j = slot.index
+    local p = CreateFrame("Button", j == 1 and "ForagerPauseButton" or ("ForagerSlot" .. j .. "Pause"), slot.row)
     p:SetSize(SIZE, SIZE)
     p:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     p.icon = DressIcon(p)
@@ -998,35 +1069,85 @@ local function BuildBar()
     p.text = p:CreateFontString(nil, "OVERLAY", "GameFontNormalOutline")
     p.text:SetPoint("BOTTOM", 0, 3)
     p:SetScript("OnClick", function(_, button)
-        if button == "RightButton" then SlashCmdList.FORAGER("") else Toggle() end
+        if button == "RightButton" then SlashCmdList.FORAGER("") else RunSlot(slot) end
     end)
     Draggable(p)
     Tooltip(p, function()
         local key = GetBindingKey("FORAGER_TOGGLE")
-        return { db.enabled and "Pause Forager" or "Resume Forager", StatusText(),
-            key and ("Key: " .. ((GetBindingText and GetBindingText(key)) or key)) or "Set a key in the options", MoveHint() }
+        local running = slot.track == db.track and db.enabled
+        local title
+        if ManyRows() then
+            title = (running and "Pause " or "Run ") .. SlotTrack(slot).name
+        else
+            title = db.enabled and "Pause Forager" or "Resume Forager"
+        end
+        local lines = { title }
+        if ManyRows() and not running and db.enabled then lines[#lines + 1] = "Stops " .. TrackName() .. ": one track runs at a time." end
+        lines[#lines + 1] = StatusText()
+        lines[#lines + 1] = key and ("Key: " .. ((GetBindingText and GetBindingText(key)) or key)) or "Set a key in the options"
+        lines[#lines + 1] = MoveHint()
+        return lines
     end)
-    pauseButton = p
-    ns.pauseButton = p
+    ns.pauseButtons[#ns.pauseButtons + 1] = p
+    if j == 1 then
+        pauseButton = p
+        ns.pauseButton = p
+    end
     if ns.SkinPauseButton then ns.SkinPauseButton(p) end
+    return p
+end
 
-    -- The track's name above the icons, once there is more than one track.
-    -- Click it for the next track, right-click for the previous one.
-    local label = CreateFrame("Button", "ForagerTrackLabel", bar)
+-- A row's name: with every track on show, a click makes that track the
+-- current one; with only the current track on show, it steps through them.
+local function LabelFor(slot)
+    local j = slot.index
+    local label = CreateFrame("Button", j == 1 and "ForagerTrackLabel" or ("ForagerSlot" .. j .. "Label"), slot.row)
     label:SetSize(120, 14)
-    label:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, 4)
     label:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     label.text = label:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     label.text:SetPoint("LEFT")
     label.text:SetJustifyH("LEFT")
-    label:SetScript("OnClick", function(_, button) CycleTrack(button == "RightButton" and -1 or 1) end)
+    if label.text.SetWordWrap then label.text:SetWordWrap(false) end
+    label:SetScript("OnClick", function(_, button)
+        if ManyRows() then
+            if slot.track ~= db.track then UseTrack(slot.track) end
+        else
+            CycleTrack(button == "RightButton" and -1 or 1)
+        end
+    end)
     Draggable(label)
     Tooltip(label, function()
+        if ManyRows() then
+            local t = SlotTrack(slot)
+            if slot.track == db.track then
+                return { "Track: " .. t.name, db.enabled and "Running" or "Paused", "Its play button runs or pauses it." }
+            end
+            return { "Track: " .. t.name, "Left-click: make this the current track", "Its play button runs it and stops the one running." }
+        end
         return { "Track: " .. TrackName(), "Left-click: next track", "Right-click: previous track" }
     end)
     label:Hide()
-    bar.trackLabel = label
-    LayoutBar(0)
+    return label
+end
+
+local function Slot(j)
+    if slots[j] then return slots[j] end
+    local slot = { index = j, buttons = {} }
+    slot.row = CreateFrame("Frame", j == 1 and "ForagerRow1" or ("ForagerRow" .. j), bar)
+    slot.label = LabelFor(slot)
+    slot.pause = PauseButtonFor(slot)
+    slots[j] = slot
+    return slot
+end
+
+local function BuildBar()
+    bar = CreateFrame("Frame", "ForagerBar", UIParent)
+    ns.bar = bar
+    bar:SetMovable(true)
+    bar:SetClampedToScreen(true)
+    Slot(1)
+    bar.trackLabel = slots[1].label
+    LayoutBar()
 end
 
 UpdateBar = function()
@@ -1042,93 +1163,119 @@ UpdateBar = function()
     if not bar then BuildBar() end
     bar:Show()
 
-    local entries = {}
-    for _, e in ipairs(s.shown) do entries[#entries + 1] = e end
-    for _, e in ipairs(s.keepShown) do entries[#entries + 1] = e end
-    for i, e in ipairs(entries) do
-        local b = TrackButton(i)
-        if b.key ~= e.key then
-            b.key = e.key
-            b.icon:SetTexture(e.texture or ICON)
-        end
+    -- Which tracks get a row: every one, or just the current one.
+    local list = {}
+    if ManyRows() then
+        for i = 1, #db.tracks do list[i] = i end
+    else
+        list[1] = db.track
     end
-    if bar.count ~= #entries then LayoutBar(#entries) end
+    local views, shape = {}, {}
+    for j, ti in ipairs(list) do
+        local slot = Slot(j)
+        slot.track = ti
+        local entries = TrackEntries(s, db.tracks[ti])
+        for i, e in ipairs(entries) do
+            local b = TrackButton(slot, i)
+            if b.key ~= e.key then
+                b.key = e.key
+                b.icon:SetTexture(e.texture or ICON)
+            end
+        end
+        views[j] = { count = #entries }
+        shape[#shape + 1] = #entries
+    end
+    barViews = views
+    local layoutKey = table.concat(shape, ",") .. (db.barVertical and "v" or "h") .. #db.tracks
+    if barLayoutKey ~= layoutKey then
+        barLayoutKey = layoutKey
+        LayoutBar()
+    end
 
     local left = math.ceil(db.delay - (GetTime() - lastSwitch))
     -- Nothing counts down while a switch is still landing.
     local landing = attempt and not attempt.done and not s.on[attempt.target]
     local nextEntry = (db.enabled and left > 0 and not landing and not Blocker(s)) and NextEntry(s)
-    for i = 1, #entries do
-        local b = trackButtons[i]
-        -- A tracker kept on alongside glows while it is on; a rotation one
-        -- while it is the rotation's current tracker.
-        local e = s.byKey[b.key]
-        local on
-        if e and e.alongside then on = s.on[b.key] == true else on = s.active == b.key end
-        -- Left out of the rotation: greyed and dimmed, still clickable.
-        local out = e and e.skipped or false
-        if b.out ~= out then
-            b.out = out
-            b.icon:SetDesaturated(out)
-            b.icon:SetAlpha(out and 0.45 or 1)
+    local sparkleButton
+    for j, ti in ipairs(list) do
+        local slot = slots[j]
+        local t = db.tracks[ti]
+        local current = ti == db.track
+        -- Only the current track's row is lit; the others wait, dimmed.
+        slot.row:SetAlpha(current and 1 or 0.55)
+        for i = 1, views[j].count do
+            local b = slot.buttons[i]
+            -- A tracker kept on alongside glows while it is on; a rotation one
+            -- while it is the rotation's current tracker.
+            local e = s.byKey[b.key]
+            local on = false
+            if current then
+                if e and e.alongside then on = s.on[b.key] == true else on = s.active == b.key end
+            end
+            -- Left out of the rotation: greyed and dimmed, still clickable.
+            local out = t.skipped[b.key] == true
+            if b.out ~= out then
+                b.out = out
+                b.icon:SetDesaturated(out)
+                b.icon:SetAlpha(out and 0.45 or 1)
+            end
+            if on ~= b.lit then
+                b.lit = on
+                -- Forager_Skins.lua fades the glow in and out, and swaps in a round
+                -- one for round icons.
+                if ns.GlowChanged then
+                    ns.GlowChanged(b, on)
+                else
+                    b.glow:SetShown(on)
+                    if on then b.anim:Play() else b.anim:Stop() end
+                end
+            end
+            -- Seconds to the next switch, and a swipe ticking down, on the icon
+            -- that comes next, in the current track's row.
+            local isNext = current and nextEntry and nextEntry.key == b.key
+            b.count:SetText((db.barCountdown and isNext) and left or "")
+            if db.barSwipe and isNext then
+                if b.swipeStart ~= lastSwitch or b.swipeDuration ~= db.delay then
+                    b.swipeStart, b.swipeDuration = lastSwitch, db.delay
+                    pcall(b.cd.SetCooldown, b.cd, lastSwitch, db.delay)
+                end
+                b.cd:Show()
+            elseif b.swipeStart then
+                -- Not Cooldown:Clear(): the game marks it as protected.
+                b.swipeStart, b.swipeDuration = nil, nil
+                b.cd:Hide()
+            end
+            if on and b.key == s.active then sparkleButton = b end
         end
-        if on ~= b.lit then
-            b.lit = on
-            -- Forager_Skins.lua fades the glow in and out, and swaps in a round
-            -- one for round icons.
-            if ns.GlowChanged then
-                ns.GlowChanged(b, on)
+
+        -- The track's name, gold for the current track.
+        local label = slot.label
+        if #db.tracks > 1 then
+            label.text:SetText(t.name)
+            if current then label.text:SetTextColor(1, 0.82, 0) else label.text:SetTextColor(0.75, 0.75, 0.75) end
+            if db.barVertical then
+                label.text:SetWidth(SIZE + GAP * 2)
+                label:SetWidth(SIZE + GAP * 2)
             else
-                b.glow:SetShown(on)
-                if on then b.anim:Play() else b.anim:Stop() end
+                label.text:SetWidth(0)
+                label:SetWidth(math.max(40, (label.text:GetStringWidth() or 0) + 6))
             end
         end
-        -- Seconds to the next switch, and a swipe ticking down, on the icon
-        -- that comes next.
-        local isNext = nextEntry and nextEntry.key == b.key
-        b.count:SetText((db.barCountdown and isNext) and left or "")
-        if db.barSwipe and isNext then
-            if b.swipeStart ~= lastSwitch or b.swipeDuration ~= db.delay then
-                b.swipeStart, b.swipeDuration = lastSwitch, db.delay
-                pcall(b.cd.SetCooldown, b.cd, lastSwitch, db.delay)
-            end
-            b.cd:Show()
-        elseif b.swipeStart then
-            -- Not Cooldown:Clear(): the game marks it as protected.
-            b.swipeStart, b.swipeDuration = nil, nil
-            b.cd:Hide()
-        end
+
+        -- Running: stop art pauses it. Otherwise play art runs it.
+        local p = slot.pause
+        local running = current and db.enabled
+        p.icon:SetDesaturated(not running)
+        p.stop:SetShown(running and p.stopArt ~= nil)
+        p.play:SetShown(not running and p.playArt ~= nil)
+        local art = running and p.stopArt or p.playArt
+        p.text:SetText(art and "" or (running and "Pause" or "Go"))
     end
 
     -- Sparkles on the tracker that is on, while running and the option is on.
     if ns.UpdateSparkles then
-        local active
-        if db.sparkles and db.enabled then
-            for i = 1, #entries do
-                if trackButtons[i].lit and trackButtons[i].key == s.active then active = trackButtons[i] end
-            end
-        end
-        ns.UpdateSparkles(active)
+        ns.UpdateSparkles((db.sparkles and db.enabled) and sparkleButton or nil)
     end
-
-    -- The track's name, when there is more than one to switch between.
-    local label = bar.trackLabel
-    if label then
-        local many = #db.tracks > 1
-        label:SetShown(many)
-        if many then
-            label.text:SetText(TrackName())
-            label:SetWidth(math.max(40, (label.text:GetStringWidth() or 0) + 6))
-        end
-    end
-
-    -- Running: stop art pauses it. Paused: play art resumes it.
-    local p = pauseButton
-    p.icon:SetDesaturated(not db.enabled)
-    p.stop:SetShown(db.enabled and p.stopArt ~= nil)
-    p.play:SetShown(not db.enabled and p.playArt ~= nil)
-    local art = db.enabled and p.stopArt or p.playArt
-    p.text:SetText(art and "" or (db.enabled and "Pause" or "Go"))
 end
 
 ---------------------------------------------------------------------------
@@ -1138,7 +1285,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 900
+local W, CONTENT_H = 680, 930
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1317,6 +1464,7 @@ local function TrackSection(parent, x, y)
     hint:SetWidth(COL - 20)
     hint:SetJustifyH("LEFT")
     hint:SetText("Tick a tracker to put it on the icons. On the icons, right-click one to leave it out of the rotation for now, and again to put it back.")
+    OptionCheck(parent, "Show every track's icons at once", "showAllTracks", x, y - 86, function() UpdateBar() end)
 
     optionRefreshers[#optionRefreshers + 1] = function()
         local n = #db.tracks
@@ -1665,7 +1813,7 @@ local function BuildContent()
 
     Header(c, "Tracks and trackers", LEFT, -450)
     TrackSection(c, LEFT, -476)
-    TrackerList(c, LEFT, -566)
+    TrackerList(c, LEFT, -596)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)

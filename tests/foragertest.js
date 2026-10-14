@@ -1538,7 +1538,7 @@ if (!EUI_ON) {
     UIParent.GetHeight = function() return 768 end
   ` + OPEN + `
     local scale = rawget(ForagerOptions, "scale")
-    check(scale and math.abs(scale - (768 - 40) / (900 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
+    check(scale and math.abs(scale - (768 - 40) / (930 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
   `);
   run('drawn sparkles follow the size and intensity', SPARK_HELPERS + `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -1713,7 +1713,7 @@ if (!EUI_ON) {
     local lowest, rows = 0, 0
     for _, f in ipairs(T.frames) do
       local p = rawget(f, "_point")
-      if p and rawget(f, "parent") == content and p[2] == 12 and p[3] <= -476 then
+      if p and rawget(f, "parent") == content and p[2] == 12 and p[3] <= -596 then
         rows = rows + 1
         lowest = math.min(lowest, p[3] - 24)
       end
@@ -1997,7 +1997,7 @@ run('tracks: only one runs, and switching hands over to the new one', `
   check(not seen["Find Herbs"] and not seen["Find Minerals"], "and only those: track 1 is not running")
   -- Make sure Hunting's own tracker is the one on when the track changes.
   local hum = ForagerTrackButton2
-  for i = 1, 4 do local b = _G["ForagerTrackButton" .. i] if b and rawget(b, "key") == 5225 then hum = b end end
+  for i = 1, 4 do local b = _G["ForagerSlot2Button" .. i] if b and rawget(b, "key") == 5225 then hum = b end end
   hum.scripts.OnClick(hum, "LeftButton") T.advance(1.5)
   check(T.active() == "Track Humanoids", "humanoids on before switching")
   SlashCmdList.FORAGER("track 1")
@@ -2010,17 +2010,70 @@ run('tracks: only one runs, and switching hands over to the new one', `
   check(not seen["Track Humanoids"], "Hunting's humanoids no longer come round")
   check(seen["Track Beasts"], "track 1's own beasts do")
 `);
-run('tracks: the label above the icons and the key binding switch them', `
+run('tracks: names above the rows, the key binding and the command switch them', `
   SlashCmdList.FORAGER("track new Second")
   ForagerDB.rotation[1494] = true ForagerDB.rotation[5225] = true
   T.advance(1)
-  local label = ForagerTrackLabel
-  check(rawget(label, "shown") ~= false, "label shown with two tracks")
-  label.scripts.OnClick(label, "LeftButton") check(ForagerDB.track == 1, "label: next wraps to 1")
-  label.scripts.OnClick(label, "RightButton") check(ForagerDB.track == 2, "label: previous")
+  check(rawget(ForagerTrackLabel, "shown") ~= false and rawget(ForagerSlot2Label, "shown") ~= false, "a name over each row")
+  ForagerTrackLabel.scripts.OnClick(ForagerTrackLabel, "LeftButton") check(ForagerDB.track == 1, "row 1's name: track 1")
+  ForagerSlot2Label.scripts.OnClick(ForagerSlot2Label, "LeftButton") check(ForagerDB.track == 2, "row 2's name: track 2")
   Forager_NextTrack() check(ForagerDB.track == 1, "binding: next")
   SlashCmdList.FORAGER("track sec") check(ForagerDB.track == 2, "by name")
+  -- Only the current track on show: its name steps through them.
+  ForagerDB.showAllTracks = false T.advance(0.5)
+  check(rawget(ForagerSlot2Label, "shown") == false or rawget(ForagerRow2, "shown") == false, "row 2 hidden")
+  ForagerTrackLabel.scripts.OnClick(ForagerTrackLabel, "LeftButton") check(ForagerDB.track == 1, "name: next wraps to 1")
+  ForagerTrackLabel.scripts.OnClick(ForagerTrackLabel, "RightButton") check(ForagerDB.track == 2, "name: previous")
 `);
+run('every track on screen at once; play on a row runs it and stops the other', `
+  ForagerDB.rotation[1494] = true
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[1494] = true ForagerDB.rotation[5225] = true
+  SlashCmdList.FORAGER("track 1")
+  T.advance(1)
+  check(rawget(ForagerRow1, "shown") ~= false and rawget(ForagerRow2, "shown") ~= false, "both rows on screen")
+  local function keys(prefix)
+    local out = {}
+    for i = 1, 6 do local b = _G[prefix .. i] if b and rawget(b, "shown") ~= false and rawget(b, "key") then out[#out + 1] = rawget(b, "key") end end
+    table.sort(out) return table.concat(out, ",")
+  end
+  check(keys("ForagerTrackButton") == "1494,2383,2580", "row 1 holds track 1's trackers: " .. keys("ForagerTrackButton"))
+  check(keys("ForagerSlot2Button") == "1494,5225", "row 2 holds Hunting's: " .. keys("ForagerSlot2Button"))
+  check(rawget(ForagerRow1, "alpha") == 1 and rawget(ForagerRow2, "alpha") < 1, "the running row is bright, the other dimmed")
+  T.advance(6.5)
+  local p1, p2 = ForagerPauseButton, ForagerSlot2Pause
+  check(rawget(p1.stop, "shown") and not rawget(p2.stop, "shown"), "row 1 shows stop, row 2 play")
+  -- Play on row 2: Hunting runs, track 1 stops.
+  p2.scripts.OnClick(p2, "LeftButton")
+  check(ForagerDB.track == 2 and ForagerDB.enabled, "Hunting running")
+  T.advance(0.5)
+  check(rawget(p2.stop, "shown") and not rawget(p1.stop, "shown"), "now row 2 shows stop, row 1 play")
+  check(rawget(ForagerRow2, "alpha") == 1 and rawget(ForagerRow1, "alpha") < 1, "Hunting's row lit")
+  local seen = {}
+  for n = 1, 8 do T.advance(6.5) seen[T.active() or "none"] = true end
+  check(seen["Track Humanoids"] and not seen["Find Herbs"] and not seen["Find Minerals"], "only Hunting rotates")
+  -- Stop on the running row pauses it.
+  p2.scripts.OnClick(p2, "LeftButton")
+  check(ForagerDB.enabled == false and ForagerDB.track == 2, "Hunting paused")
+  local n = T.switches T.advance(20) check(T.switches == n, "nothing runs")
+  -- Play on row 1 runs track 1 again.
+  p1.scripts.OnClick(p1, "LeftButton")
+  check(ForagerDB.track == 1 and ForagerDB.enabled, "track 1 running")
+`);
+run('a dimmed row still turns trackers on and leaves them out of its own track', `
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[1494] = true ForagerDB.rotation[5225] = true
+  SlashCmdList.FORAGER("track 1")
+  T.advance(1)
+  local hum
+  for i = 1, 4 do local b = _G["ForagerSlot2Button" .. i] if b and rawget(b, "key") == 5225 then hum = b end end
+  hum.scripts.OnClick(hum, "RightButton")
+  check(ForagerDB.tracks[2].skipped[5225] == true and not ForagerDB.tracks[1].skipped[5225], "left out of Hunting only")
+  hum.scripts.OnClick(hum, "LeftButton") T.advance(1.5)
+  check(T.active() == "Track Humanoids", "left-click still turns it on")
+  check(ForagerDB.track == 1, "and does not change the running track")
+`);
+
 run('tracks: delete needs a second click, rename sticks, saved once', `
   SlashCmdList.FORAGER("track new Spare")
   SlashCmdList.FORAGER("")

@@ -866,7 +866,7 @@ function ns.ProbeIcons(out)
     end
     local list = {}
     for _, button in ipairs(ns.trackButtons or {}) do list[#list + 1] = button end
-    if ns.pauseButton then list[#list + 1] = ns.pauseButton end
+    for _, button in ipairs(ns.pauseButtons or { ns.pauseButton }) do list[#list + 1] = button end
     for i, button in ipairs(list) do
         local ok, line = pcall(function()
             local icon, parts = button.icon, rawget(button, "fgCircle")
@@ -934,7 +934,7 @@ end
 
 function ns.UpdateIconShapes()
     for _, button in ipairs(ns.trackButtons or {}) do ns.ShapeIcon(button) end
-    if ns.pauseButton then ns.SkinPauseButton(ns.pauseButton) end
+    for _, button in ipairs(ns.pauseButtons or { ns.pauseButton }) do ns.SkinPauseButton(button) end
 end
 
 Styles.Setup({
