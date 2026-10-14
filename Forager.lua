@@ -982,19 +982,63 @@ end
 
 -- The position is the bar's center in UIParent units, so changing the icon
 -- size grows the bar about its center.
-local function SaveBarPosition()
-    local x, y = bar:GetCenter()
-    if not x then return end
+-- Which point holds the icons in place: the side the rows line up on, so a
+-- row that grows or shrinks (switching tracks with one row on show, or a
+-- tracker added) keeps that side still. Left, center or right; top, center
+-- or bottom when the icons are stacked vertically. Before 1.13.3 it was always
+-- the middle, so a row grew both ways and only its name followed the setting.
+local POINT_OFFSET = {
+    CENTER = { 0, 0 }, LEFT = { -0.5, 0 }, RIGHT = { 0.5, 0 }, TOP = { 0, 0.5 }, BOTTOM = { 0, -0.5 },
+}
+
+local function HoldPoint()
+    local align = db.trackAlign or "start"
+    if db.barVertical then
+        return (align == "end" and "BOTTOM") or (align == "center" and "CENTER") or "TOP"
+    end
+    return (align == "end" and "RIGHT") or (align == "center" and "CENTER") or "LEFT"
+end
+
+-- A saved spot { x, y, point } in UIParent units, held by `want` instead,
+-- without the frame moving on screen. A spot saved before 1.13.3 has no
+-- point: it is the frame's middle.
+local function HeldBy(pos, want, frame)
+    local have = pos[3] or "CENTER"
+    if have == want then return pos end
     local scale = bar:GetScale()
-    db.barPos = { x * scale, y * scale }
+    local w, h = (frame:GetWidth() or 0) * scale, (frame:GetHeight() or 0) * scale
+    local a, b = POINT_OFFSET[have] or POINT_OFFSET.CENTER, POINT_OFFSET[want]
+    local cx, cy = pos[1] - a[1] * w, pos[2] - a[2] * h
+    return { cx + b[1] * w, cy + b[2] * h, want }
+end
+
+-- Where a frame's `want` point is now, in UIParent units.
+local function SpotOf(frame, want)
+    local x, y = frame:GetCenter()
+    if not x then return nil end
+    local scale = bar:GetScale()
+    local o = POINT_OFFSET[want]
+    return { x * scale + o[1] * (frame:GetWidth() or 0) * scale, y * scale + o[2] * (frame:GetHeight() or 0) * scale, want }
+end
+
+local function SaveBarPosition()
+    local spot = SpotOf(bar, HoldPoint())
+    if spot then db.barPos = spot end
 end
 
 local function PlaceBar()
     bar:ClearAllPoints()
     local scale = bar:GetScale()
+    local want = HoldPoint()
+    if not db.barPos then
+        -- The first time: the middle of the screen, a little low.
+        local cx = (UIParent:GetWidth() or 0) / 2
+        local cy = (UIParent:GetHeight() or 0) / 2 - 180
+        db.barPos = { cx, cy, "CENTER" }
+    end
+    db.barPos = HeldBy(db.barPos, want, bar)
     local p = db.barPos
-    if p then bar:SetPoint("CENTER", UIParent, "BOTTOMLEFT", p[1] / scale, p[2] / scale)
-    else bar:SetPoint("CENTER", UIParent, "CENTER", 0, -180 / scale) end
+    bar:SetPoint(want, UIParent, "BOTTOMLEFT", p[1] / scale, p[2] / scale)
 end
 
 -- Lays out every row on show: its track's name, its tracker buttons and its
@@ -1009,10 +1053,8 @@ end
 local function SaveRowPosition(slot)
     local t = db.tracks[slot.track]
     if not t then return end
-    local x, y = slot.row:GetCenter()
-    if not x then return end
-    local scale = bar:GetScale()
-    t.pos = { x * scale, y * scale }
+    local spot = SpotOf(slot.row, HoldPoint())
+    if spot then t.pos = spot end
 end
 
 local function LayoutBar()
@@ -1089,8 +1131,11 @@ local function LayoutBar()
             -- dragged, it stays where the joined layout put it.
             if own then
                 local scale = bar:GetScale()
+                local want = HoldPoint()
+                own = HeldBy(own, want, slot.row)
+                db.tracks[slot.track].pos = own
                 slot.row:ClearAllPoints()
-                slot.row:SetPoint("CENTER", UIParent, "BOTTOMLEFT", own[1] / scale, own[2] / scale)
+                slot.row:SetPoint(want, UIParent, "BOTTOMLEFT", own[1] / scale, own[2] / scale)
             end
             local function Put(b, i)
                 local offset = (i - 1) * (SIZE + igap)

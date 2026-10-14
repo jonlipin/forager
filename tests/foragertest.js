@@ -2185,11 +2185,13 @@ run('rows moved on their own keep their place; locking and reset still work', TW
   p2.scripts.OnDragStart(p2) p2.scripts.OnDragStop(p2)
   check(moved.row2 and not moved.bar, "apart: only that row moves")
   local pos = ForagerDB.tracks[2].pos
-  check(pos and pos[1] == 500 and pos[2] == 300, "row 2's place saved with its track")
+  local half = ForagerRow2:GetWidth() / 2
+  check(pos and pos[3] == "LEFT" and math.abs(pos[1] - (500 - half)) < 1e-6 and pos[2] == 300,
+    "row 2's place saved, held by its left edge, with its track")
   check(ForagerDB.tracks[1].pos == nil, "row 1 untouched")
   T.advance(0.3)
   local p = rawget(ForagerRow2, "_point")
-  check(p[1] == "CENTER" and p[2] == UIParent and p[4] == 500 and p[5] == 300, "row 2 drawn where it was left")
+  check(p[1] == "LEFT" and p[2] == UIParent and math.abs(p[4] - (500 - half)) < 1e-6 and p[5] == 300, "row 2 drawn where it was left")
   moved = {}
   ForagerDB.barLocked = true
   p2.scripts.OnDragStart(p2) p2.scripts.OnDragStop(p2)
@@ -2496,6 +2498,40 @@ run('each track puts its play button on the right or the left of its icons', OPE
   check(rawget(b, "text") == "Play: top", "stacked vertically it says top: " .. tostring(rawget(b, "text")))
   local p = rawget(ForagerSlot2Pause, "_point")
   check(p[1] == "TOP" and p[#p] == 0, "and sits at the top of its column")
+`);
+run('with one row on show, switching tracks keeps the icons on their aligned side', `
+  ForagerDB.rotation[1494] = true                    -- track 1: three icons
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[5225] = true                    -- Hunting: one icon
+  SlashCmdList.FORAGER("track 1")
+  ForagerDB.showAllTracks = false
+  ForagerDB.barPos = { 500, 300 }                    -- saved by an older version: the middle
+  T.advance(0.5)
+  local p = ForagerDB.barPos
+  check(p[3] == "LEFT", "left aligned: held by the left edge, got " .. tostring(p[3]))
+  check(math.abs(p[1] - (500 - ForagerBar:GetWidth() / 2)) < 1e-6 and p[2] == 300, "converted from the old middle without moving")
+  local pt = rawget(ForagerBar, "_point")
+  check(pt[1] == "LEFT" and pt[4] == p[1], "placed by its left edge")
+  SlashCmdList.FORAGER("track 2") T.advance(0.5)
+  pt = rawget(ForagerBar, "_point")
+  check(pt[1] == "LEFT" and pt[4] == p[1] and pt[5] == p[2], "switching tracks keeps the left edge still")
+  SlashCmdList.FORAGER("align right") T.advance(0.3)
+  pt = rawget(ForagerBar, "_point")
+  check(pt[1] == "RIGHT", "right aligned: held by the right edge")
+  local rx = pt[4]
+  SlashCmdList.FORAGER("track 1") T.advance(0.5)
+  check(rawget(ForagerBar, "_point")[4] == rx, "and it stays put when switching")
+  SlashCmdList.FORAGER("align center") T.advance(0.3)
+  check(rawget(ForagerBar, "_point")[1] == "CENTER", "centered: held by the middle")
+  ForagerDB.barVertical = true
+  SlashCmdList.FORAGER("align top") T.advance(0.3)
+  pt = rawget(ForagerBar, "_point")
+  check(pt[1] == "TOP", "stacked vertically, top aligned: held by the top, got " .. tostring(pt[1]))
+  local ty = pt[5]
+  SlashCmdList.FORAGER("track 2") T.advance(0.5)
+  check(rawget(ForagerBar, "_point")[5] == ty, "switching tracks keeps the top still")
+  SlashCmdList.FORAGER("align bottom") T.advance(0.3)
+  check(rawget(ForagerBar, "_point")[1] == "BOTTOM", "bottom aligned: held by the bottom")
 `);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);
