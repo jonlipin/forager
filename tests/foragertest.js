@@ -2090,5 +2090,31 @@ run('tracks: delete needs a second click, rename sticks, saved once', `
   check(ForagerDB.rotation == nil and ForagerDB.skipped == nil, "the current track's tables are not saved twice")
   check(ForagerDB.tracks[1].rotation[2383], "the track keeps its ticks")
 `);
+run('after a reload, play on another track starts it at once', `
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[1494] = true ForagerDB.rotation[5225] = true
+  SlashCmdList.FORAGER("track 1")
+  SlashCmdList.FORAGER("off")
+  T.advance(1)
+  -- As after a reload: Find Herbs (track 1's) is on, and Forager has no
+  -- memory of turning it on.
+  T.tracking[1].active = true
+  T.fire("MINIMAP_UPDATE_TRACKING")
+  T.advance(0.5)
+  ForagerSlot2Pause.scripts.OnClick(ForagerSlot2Pause, "LeftButton")
+  check(ForagerDB.track == 2 and ForagerDB.enabled, "Hunting running")
+  T.advance(1.5)
+  check(T.active() == "Track Beasts" or T.active() == "Track Humanoids", "Hunting's tracker on at once, got " .. tostring(T.active()))
+  local seen = {}
+  for n = 1, 6 do T.advance(6.5) seen[T.active() or "none"] = true end
+  check(seen["Track Beasts"] and seen["Track Humanoids"], "and rotating")
+`);
+run('a tracker in none of your tracks still counts as your own pick', `
+  T.advance(6.5) check(T.active() == "Find Herbs", "rotating")
+  T.tracking[1].active = false T.tracking[3].active = true -- Track Beasts, ticked nowhere
+  T.fire("MINIMAP_UPDATE_TRACKING")
+  local n = T.switches
+  T.advance(20) check(T.active() == "Track Beasts" and T.switches == n, "left alone")
+`);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

@@ -112,6 +112,14 @@ local function SelectTrack(i)
     return t
 end
 
+-- Ticked in any track, not only the current one.
+local function InAnyTrack(key)
+    for _, t in ipairs(db.tracks) do
+        if t.rotation and t.rotation[key] then return true end
+    end
+    return false
+end
+
 local function TrackName()
     return db.tracks[db.track].name
 end
@@ -187,7 +195,9 @@ local function Scan()
         for _, e in ipairs(s.list) do
             if e.active and not e.alongside then
                 s.active = e.key
-                if not InRotation(e.key) then s.other = e.name end
+                -- Your own pick only if no track of yours has it: a tracker left on by
+                -- another track (even from before a reload) is fair game.
+                if not InAnyTrack(e.key) then s.other = e.name end
                 break
             end
         end
@@ -392,6 +402,8 @@ local function UseTrack(i, quiet)
     SelectTrack(i)
     currentKey = nil
     local s = Scan()
+    -- Whatever the old track left on is the new track's to replace.
+    if s.active then placedKey = s.active end
     if not (s.active and InRotation(s.active) and not Skipped(s.active)) then lastSwitch = 0 end
     Log("track: " .. TrackName())
     if not quiet then Print("track: " .. TrackName()) end
