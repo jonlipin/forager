@@ -1548,7 +1548,7 @@ if (!EUI_ON) {
     UIParent.GetHeight = function() return 768 end
   ` + OPEN + `
     local scale = rawget(ForagerOptions, "scale")
-    check(scale and math.abs(scale - (768 - 40) / (1080 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
+    check(scale and math.abs(scale - (768 - 40) / (1210 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
   `);
   run('drawn sparkles follow the size and intensity', SPARK_HELPERS + `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -1720,12 +1720,15 @@ if (!EUI_ON) {
     check(y(look) > y(NS.styleButton) and y(NS.styleButton) - 22 > y(note), "header, then the style button, then the note")
     check(y(note) - 26 >= y(holder), "two lines of note fit above the slider")
     check(y(holder) - rawget(holder, "_h") > y(trackers), "the slider ends above the tracker list header")
+    -- The tracker rows live in the tracks' inset, below its name, switches and hint.
+    local inset = NS.trackInset
+    local insetY = rawget(inset, "_point")[5]
     local lowest, rows = 0, 0
     for _, f in ipairs(T.frames) do
       local p = rawget(f, "_point")
-      if p and rawget(f, "parent") == content and p[2] == 12 and p[3] <= -746 then
+      if p and rawget(f, "parent") == inset and p[2] == 8 and type(p[3]) == "number" and p[3] <= -134 then
         rows = rows + 1
-        lowest = math.min(lowest, p[3] - 24)
+        lowest = math.min(lowest, insetY + p[3] - 24)
       end
     end
     check(rows == 12, "twelve tracker rows, got " .. rows)
@@ -2337,6 +2340,128 @@ run('key press mode ignores modifiers, Tab, Escape, Enter and keys pressed with 
   IsShiftKeyDown = function() return false end
   T.key("W")
   check((T.switches or 0) == n + 1, "a plain key does")
+`);
+
+const FIND = `
+  function T.withText(text)
+    for _, f in ipairs(T.frames) do if rawget(f, "text") == text then return f end end
+  end
+  function T.rowFor(key)
+    for _, r in ipairs(NS.trackerRows) do if rawget(r, "key") == key and rawget(r, "inUse") then return r end end
+  end
+`
+run('tracks are tabs: click one to edit it while the running track keeps running; Use this track switches', OPEN + FIND + `
+  SlashCmdList.FORAGER("track new Hunting")
+  SlashCmdList.FORAGER("track 1")
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  local tab1, tab2 = ForagerTrackTab1, ForagerTrackTab2
+  check(tab1 and tab2 and rawget(tab2, "shown") ~= false, "a tab per track")
+  check(rawget(tab2, "text") == "Hunting", "named: " .. tostring(rawget(tab2, "text")))
+  tab2.scripts.OnClick(tab2)
+  check(ForagerDB.track == 1, "clicking a tab doesn't change the running track")
+  check(rawget(ForagerTrackName, "text") == "Hunting", "the box shows the open tab's name")
+  local beasts = T.rowFor(1494)
+  beasts.checked = true beasts.scripts.OnClick(beasts)
+  check(ForagerDB.tracks[2].rotation[1494] == true, "ticked in Hunting")
+  check(not ForagerDB.tracks[1].rotation[1494], "and not in the running track")
+  local use = T.withText("Use this track")
+  check(use ~= nil and rawget(use, "shown") ~= false, "Use this track shows for a track that isn't running")
+  use.scripts.OnClick(use)
+  check(ForagerDB.track == 2, "Use this track makes it the current one")
+  check(rawget(use, "shown") == false, "and then hides")
+`);
+run('the New track button opens a new tab without changing the running track', OPEN + FIND + `
+  T.advance(6.5)
+  local new = T.withText("New track")
+  new.scripts.OnClick(new)
+  check(#ForagerDB.tracks == 2 and ForagerDB.track == 1, "added, track 1 still current")
+  check(rawget(ForagerTrackName, "text") == "Track 2", "its tab is open: " .. tostring(rawget(ForagerTrackName, "text")))
+  check(T.active() == "Find Herbs" or T.active() == "Find Minerals", "tracking unchanged")
+`);
+run('drag a tracker in the options to change the order', OPEN + FIND + `
+  ForagerDB.rotation[1494] = true
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  local handles = NS.trackerHandles
+  for i, h in ipairs(handles) do h.GetCenter = function() return 100, 1000 - i * 26 end end
+  local cursor = GetCursorPosition
+  local beasts
+  for i, r in ipairs(NS.trackerRows) do if rawget(r, "key") == 1494 then beasts = handles[i] end end
+  GetCursorPosition = function() return 100, 990 end -- above the first row
+  beasts.scripts.OnDragStart(beasts)
+  beasts.scripts.OnDragStop(beasts)
+  check(ForagerDB.order[1] == 1494, "Track Beasts dragged to the top: " .. tostring(ForagerDB.order[1]))
+  -- Drag the last row up between the first two.
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  local last
+  for i, r in ipairs(NS.trackerRows) do if rawget(r, "inUse") then last = i end end
+  GetCursorPosition = function() return 100, 1000 - 1.5 * 26 end
+  handles[last].scripts.OnDragStart(handles[last])
+  handles[last].scripts.OnDragStop(handles[last])
+  local moved = rawget(NS.trackerRows[last], "key")
+  check(ForagerDB.order[2] ~= nil, "order saved")
+  GetCursorPosition = cursor
+`);
+run('drag a tab to change the order of the tracks; the running track stays current', OPEN + FIND + `
+  SlashCmdList.FORAGER("track new Hunting")
+  SlashCmdList.FORAGER("track new Fishing")
+  SlashCmdList.FORAGER("track 2")
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  local tabs = { ForagerTrackTab1, ForagerTrackTab2, ForagerTrackTab3 }
+  for i, tab in ipairs(tabs) do tab.GetCenter = function() return 50 + (i - 1) * 100, 0 end end
+  local cursor = GetCursorPosition
+  GetCursorPosition = function() return 10, 0 end -- left of the first tab
+  tabs[3].scripts.OnDragStart(tabs[3])
+  tabs[3].scripts.OnDragStop(tabs[3])
+  check(ForagerDB.tracks[1].name == "Fishing", "Fishing dragged to the front: " .. tostring(ForagerDB.tracks[1].name))
+  check(ForagerDB.tracks[db_track_name_check or 1] ~= nil, "tracks intact")
+  check(ForagerDB.tracks[ForagerDB.track].name == "Hunting", "Hunting is still the current track: " .. tostring(ForagerDB.tracks[ForagerDB.track].name))
+  GetCursorPosition = cursor
+`);
+run('each tracker can have its own time before the switch', OPEN + FIND + `
+  local herbs = T.rowFor(2383)
+  local box = rawget(herbs, "dur")
+  box.GetText = function() return "15" end
+  box.scripts.OnEnterPressed(box)
+  check(ForagerDB.tracks[1].durations[2383] == 15, "15 s saved for Find Herbs")
+  T.advance(6.5) check(T.active() == "Find Herbs", "herbs on")
+  T.advance(12) check(T.active() == "Find Herbs", "kept up past 6 s")
+  T.advance(4) check(T.active() == "Find Minerals", "switched after 15 s")
+  T.advance(4) check(T.active() == "Find Minerals", "minerals on its own default")
+  T.advance(3) check(T.active() == "Find Herbs", "after 6 s")
+  box.GetText = function() return "" end
+  box.scripts.OnEnterPressed(box)
+  check(ForagerDB.tracks[1].durations[2383] == nil, "emptied: back to the default")
+`);
+run('gap between icons, and a track can hide its name', OPEN + FIND + `
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[1494] = true
+  SlashCmdList.FORAGER("track 1")
+  T.advance(0.5)
+  local function x(f) local p = rawget(f, "_point") return p[#p - 1] end
+  check(x(ForagerTrackButton2) == 36 + 6, "default 6 px: " .. tostring(x(ForagerTrackButton2)))
+  SlashCmdList.FORAGER("icongap 10") T.advance(0.3)
+  check(x(ForagerTrackButton2) == 36 + 10, "10 px: " .. tostring(x(ForagerTrackButton2)))
+  local function rowY(row) local p = rawget(row, "_point") return p[5] end
+  local before = rowY(ForagerRow2)
+  ForagerTrackTab2.scripts.OnClick(ForagerTrackTab2)
+  local cb = NS.showNameCheck
+  cb.checked = false cb.scripts.OnClick(cb)
+  check(ForagerDB.tracks[2].hideName == true, "Hunting hides its name")
+  T.advance(0.3)
+  check(rawget(ForagerSlot2Label, "shown") == false, "its name is hidden")
+  check(rawget(ForagerTrackLabel, "shown") ~= false, "track 1 still shows its own")
+  check(rowY(ForagerRow2) > before, "and its row moves up into the space")
+`);
+run('the status button shows only when the timer was refused', OPEN + FIND + PRINTED + `
+  local retry = NS.retryButton
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(retry, "shown") == false, "hidden while switching on the timer")
+  ForagerDB.method = "key" ForagerDB.methodWhy = "blocked"
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(retry, "shown") == true, "shown after a refusal")
+  retry.scripts.OnClick(retry)
+  check(ForagerDB.method == nil and T.printed("trying the timer again"), "it works and says so")
+  check(rawget(retry, "shown") == false, "then hides")
 `);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

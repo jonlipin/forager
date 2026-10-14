@@ -40,7 +40,8 @@ local DEFAULTS = {
     showAllTracks = true,  -- a row of icons for every track, not just the current one
     trackAlign = "start",  -- rows line up on the left (columns at the top), "center" or "end"
     trackGap = 12,         -- space between the tracks' rows (or columns), in pixels
-    tracksApart = false,   -- each track's row moves on its own, saved per track  -- hunter in a battleground or arena: Track Humanoids
+    tracksApart = false,   -- each track's row moves on its own, saved per track
+    iconGap = 6,           -- space between the icons in a row, in pixels  -- hunter in a battleground or arena: Track Humanoids
     style = "auto",        -- window style: "auto", "blizzard" or "dark" (Styles.lua)
     darkAlpha = 0.92,      -- the Dark style's background opacity
     sparkles = true,       -- sparkles round the active tracker's border
@@ -111,6 +112,7 @@ local function SelectTrack(i)
     local t = db.tracks[i]
     t.rotation = t.rotation or {}
     t.skipped = t.skipped or {}
+    t.durations = t.durations or {}
     t.name = t.name or ("Track " .. i)
     db.track = i
     db.rotation, db.skipped = t.rotation, t.skipped
@@ -123,6 +125,13 @@ local function InAnyTrack(key)
         if t.rotation and t.rotation[key] then return true end
     end
     return false
+end
+
+-- Where a track (a track table) sits in the list.
+local function IndexOfTrack(t)
+    for i, x in ipairs(db.tracks) do
+        if x == t then return i end
+    end
 end
 
 local function TrackName()
@@ -212,15 +221,17 @@ end
 
 -- Moves a tracker one place up (-1) or down (+1). The saved order keeps
 -- trackers this character doesn't know, so another character's order stays.
-local function MoveTracker(key, dir)
+local function MoveTrackerTo(key, to)
     local s = Scan()
     local keys = {}
     for _, e in ipairs(s.list) do keys[#keys + 1] = e.key end
     local i
     for n, k in ipairs(keys) do if k == key then i = n end end
-    local j = i and i + dir
-    if not (j and j >= 1 and j <= #keys) then return false end
-    keys[i], keys[j] = keys[j], keys[i]
+    if not i then return false end
+    to = math.max(1, math.min(#keys, to))
+    if to == i then return false end
+    table.remove(keys, i)
+    table.insert(keys, to, key)
     local known = {}
     for _, k in ipairs(keys) do known[k] = true end
     for _, k in ipairs(db.order) do
@@ -228,6 +239,15 @@ local function MoveTracker(key, dir)
     end
     db.order = keys
     return true
+end
+
+local function MoveTracker(key, dir)
+    local s = Scan()
+    local i
+    for n, e in ipairs(s.list) do if e.key == key then i = n end end
+    local j = i and i + dir
+    if not (j and j >= 1 and j <= #s.list) then return false end
+    return MoveTrackerTo(key, j)
 end
 
 local function NameOf(s, key)
@@ -319,8 +339,18 @@ local function Momentary(s)
     if nextEntry and OnCooldown(nextEntry.key) then return "global cooldown" end
 end
 
-local function Due()
-    return GetTime() - lastSwitch >= db.delay
+-- How long the tracker that is on stays before the next switch: its own time
+-- in the current track, when it has one, else Time between switches.
+local function CurrentDelay(s)
+    local t = db.tracks and db.tracks[db.track]
+    local key = s and s.active
+    local d = key and t and t.durations and t.durations[key]
+    if type(d) == "number" and d > 0 then return d end
+    return db.delay
+end
+
+local function Due(s)
+    return GetTime() - lastSwitch >= CurrentDelay(s or Scan())
 end
 
 -- Says why Forager fell back from the timer, once: a fallback found again
@@ -430,8 +460,8 @@ local function Cast(e, source)
 end
 
 local function TrySwitch(source)
-    if not Due() then return end
     local s = Scan()
+    if not Due(s) then return end
     if Blocker(s) or Momentary(s) then return end
     if attempt and not attempt.done then return end
     Cast(NextEntry(s), source)
@@ -463,26 +493,65 @@ local function CycleTrack(dir)
     UseTrack((db.track - 1 + dir) % n + 1)
 end
 
-local function NewTrack(name)
-    db.tracks[#db.tracks + 1] = { name = name or ("Track " .. (#db.tracks + 1)), rotation = {}, skipped = {} }
-    UseTrack(#db.tracks, true)
-    Print("new track \"" .. TrackName() .. "\": tick its trackers in the options.")
+-- A new, empty track. From the command it becomes the current track; from
+-- the options it opens in its tab to be ticked, and the running track keeps
+-- running.
+local function NewTrack(name, keepCurrent)
+    local t = { name = name or ("Track " .. (#db.tracks + 1)), rotation = {}, skipped = {}, durations = {} }
+    db.tracks[#db.tracks + 1] = t
+    if keepCurrent then
+        Log("new track " .. t.name)
+        if UpdateBar then UpdateBar() end
+    else
+        UseTrack(#db.tracks, true)
+    end
+    Print("new track \"" .. t.name .. "\": tick its trackers in the options.")
+    return t
 end
 
-local function DeleteTrack()
+-- Deletes a track (the current one by default). Deleting another track
+-- leaves the current one running.
+local function DeleteTrack(t)
     if #db.tracks < 2 then return end
-    local gone = TrackName()
-    table.remove(db.tracks, db.track)
-    UseTrack(math.min(db.track, #db.tracks), true)
-    Print("deleted track \"" .. gone .. "\". Now on \"" .. TrackName() .. "\".")
+    t = t or db.tracks[db.track]
+    local i = IndexOfTrack(t)
+    if not i then return end
+    local current = db.tracks[db.track]
+    table.remove(db.tracks, i)
+    if t == current then
+        UseTrack(math.min(i, #db.tracks), true)
+    else
+        SelectTrack(IndexOfTrack(current))
+        if UpdateBar then UpdateBar() end
+        if RefreshOptions then RefreshOptions() end
+    end
+    Print("deleted track \"" .. t.name .. "\". Now on \"" .. TrackName() .. "\".")
 end
 
-local function RenameTrack(text)
+local function RenameTrack(text, t)
+    t = t or db.tracks[db.track]
     text = (text or ""):match("^%s*(.-)%s*$")
-    if text == "" or text == TrackName() then return end
-    db.tracks[db.track].name = text
+    if text == "" or text == t.name then return end
+    t.name = text
     Log("track renamed " .. text)
     if UpdateBar then UpdateBar() end
+end
+
+-- Moves a track to another place in the list, and so on screen. The current
+-- track stays the current one.
+local function MoveTrackTo(from, to)
+    local n = #db.tracks
+    if not (from and to) or from < 1 or from > n then return false end
+    to = math.max(1, math.min(n, to))
+    if to == from then return false end
+    local current = db.tracks[db.track]
+    local t = table.remove(db.tracks, from)
+    table.insert(db.tracks, to, t)
+    SelectTrack(IndexOfTrack(current))
+    Log("track " .. t.name .. " moved to " .. to)
+    if UpdateBar then UpdateBar() end
+    if RefreshOptions then RefreshOptions() end
+    return true
 end
 
 -- Death clears tracking. Each character's last tracker is remembered and put
@@ -764,7 +833,7 @@ local function StatusText()
         "Switches " .. MethodText(),
     }
     if (db.method == "key" or db.method == "none") and db.methodWhy ~= "user" then
-        lines[#lines + 1] = "|cff9d9d9dTry the timer again: /forager retest, the button in the options, or /reload|r"
+        lines[#lines + 1] = "|cff9d9d9dTo try the timer again: /forager retest, /reload, or untick Switch only on key presses|r"
     end
     if #out > 0 then table.insert(lines, 3, "Left out: |cff9d9d9d" .. table.concat(out, ", ") .. "|r") end
     if #db.tracks > 1 then table.insert(lines, 1, "Track: |cffffffff" .. TrackName() .. "|r") end
@@ -773,7 +842,7 @@ local function StatusText()
         lines[#lines + 1] = "|cffffb040Waiting: " .. reason .. "|r"
     else
         local nextName = NextEntry(s).name
-        local left = db.delay - (GetTime() - lastSwitch)
+        local left = CurrentDelay(s) - (GetTime() - lastSwitch)
         if left > 0 then
             lines[#lines + 1] = string.format("%s in %d s", nextName, math.ceil(left))
         elseif db.method == "key" then
@@ -951,8 +1020,18 @@ local function LayoutBar()
     bar:SetScale((db.barScale or 100) / 100)
     local views = barViews
     local named = #db.tracks > 1
-    local LH = named and 16 or 0
+    -- A track's name shows over its row unless that track hides it; a row
+    -- without one moves up into the space. Columns keep one line for names.
+    local function Named(slot)
+        local t = slot.track and db.tracks[slot.track]
+        return named and not (t and t.hideName)
+    end
+    local LH = 0
+    for j, slot in ipairs(slots) do
+        if views[j] and Named(slot) then LH = 16 end
+    end
     local gap = db.trackGap or 12
+    local igap = db.iconGap or GAP
     local align = db.trackAlign or "start"
     -- First the size of every row, then the bar's size, then where each row
     -- goes: rows of different lengths line up on one side (top or bottom
@@ -962,13 +1041,13 @@ local function LayoutBar()
         local v = views[j]
         if v then
             count = count + 1
-            local long = SIZE * (v.count + 1) + GAP * v.count
+            local long = SIZE * (v.count + 1) + igap * v.count
             longs[j] = long
             if db.barVertical then
                 across = across + SIZE + (count > 1 and gap or 0)
                 down = math.max(down, long + LH)
             else
-                down = down + SIZE + LH + (count > 1 and gap or 0)
+                down = down + SIZE + (Named(slots[j]) and LH or 0) + (count > 1 and gap or 0)
                 across = math.max(across, long)
             end
         end
@@ -998,12 +1077,13 @@ local function LayoutBar()
                 at = at + SIZE + gap
             else
                 slot.row:SetSize(long, SIZE)
-                slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", Shift(long), -(at + LH))
+                local lh = Named(slot) and LH or 0
+                slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", Shift(long), -(at + lh))
                 -- The name sits over the row's lined-up side.
                 if align == "end" and not own then slot.label:SetPoint("BOTTOMRIGHT", slot.row, "TOPRIGHT", 0, 3)
                 elseif align == "center" and not own then slot.label:SetPoint("BOTTOM", slot.row, "TOP", 0, 3)
                 else slot.label:SetPoint("BOTTOMLEFT", slot.row, "TOPLEFT", 0, 3) end
-                at = at + SIZE + LH + gap
+                at = at + SIZE + lh + gap
             end
             -- Moved on its own: the row goes where it was left. Until it is
             -- dragged, it stays where the joined layout put it.
@@ -1013,7 +1093,7 @@ local function LayoutBar()
                 slot.row:SetPoint("CENTER", UIParent, "BOTTOMLEFT", own[1] / scale, own[2] / scale)
             end
             local function Put(b, i)
-                local offset = (i - 1) * (SIZE + GAP)
+                local offset = (i - 1) * (SIZE + igap)
                 b:ClearAllPoints()
                 if db.barVertical then b:SetPoint("TOP", slot.row, "TOP", 0, -offset)
                 else b:SetPoint("LEFT", slot.row, "LEFT", offset, 0) end
@@ -1023,7 +1103,7 @@ local function LayoutBar()
                 if i <= n then Put(b, i) end
             end
             Put(slot.pause, n + 1)
-            slot.label:SetShown(named)
+            slot.label:SetShown(Named(slot))
         end
     end
     PlaceBar()
@@ -1326,13 +1406,15 @@ UpdateBar = function()
     barViews = views
     local layoutKey = table.concat(shape, ",") .. (db.barVertical and "v" or "h") .. #db.tracks
         .. (db.trackAlign or "start") .. (db.trackGap or 12) .. (RowsApart() and "apart" or "")
-        .. table.concat(list, ",")
+        .. table.concat(list, ",") .. "g" .. (db.iconGap or GAP)
+    for _, ti in ipairs(list) do layoutKey = layoutKey .. (db.tracks[ti].hideName and "x" or "n") end
     if barLayoutKey ~= layoutKey then
         barLayoutKey = layoutKey
         LayoutBar()
     end
 
-    local left = math.ceil(db.delay - (GetTime() - lastSwitch))
+    local delay = CurrentDelay(s)
+    local left = math.ceil(delay - (GetTime() - lastSwitch))
     -- Nothing counts down while a switch is still landing.
     local landing = attempt and not attempt.done and not s.on[attempt.target]
     local nextEntry = (db.enabled and left > 0 and not landing and not Blocker(s)) and NextEntry(s)
@@ -1375,9 +1457,9 @@ UpdateBar = function()
             local isNext = current and nextEntry and nextEntry.key == b.key
             b.count:SetText((db.barCountdown and isNext) and left or "")
             if db.barSwipe and isNext then
-                if b.swipeStart ~= lastSwitch or b.swipeDuration ~= db.delay then
-                    b.swipeStart, b.swipeDuration = lastSwitch, db.delay
-                    pcall(b.cd.SetCooldown, b.cd, lastSwitch, db.delay)
+                if b.swipeStart ~= lastSwitch or b.swipeDuration ~= delay then
+                    b.swipeStart, b.swipeDuration = lastSwitch, delay
+                    pcall(b.cd.SetCooldown, b.cd, lastSwitch, delay)
                 end
                 b.cd:Show()
             elseif b.swipeStart then
@@ -1425,7 +1507,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 1080
+local W, CONTENT_H = 680, 1210
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1649,87 +1731,101 @@ local function AlignButton(parent, x, y)
     return b
 end
 
--- Which track the list below edits, with buttons to add and delete tracks
--- and a box to rename the one on show.
-local function TrackSection(parent, x, y)
-    local pick = TryCreate("Button", "ForagerTrackPick", parent, { "UIPanelButtonTemplate" })
-    pick:SetSize(150, 22)
-    pick:SetPoint("TOPLEFT", x + 2, y)
-    pick:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    pick:SetScript("OnClick", function(_, mouse) CycleTrack(mouse == "RightButton" and -1 or 1) end)
-    pick:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Track: " .. TrackName(), 1, 1, 1)
-        GameTooltip:AddLine("A track is a set of trackers to rotate. Switch tracks here, with the name above the icons, or with a key binding.", 0.8, 0.8, 0.8, true)
-        GameTooltip:AddLine("Left-click: next track   Right-click: previous", 0.7, 0.7, 0.7)
-        GameTooltip:Show()
-    end)
-    pick:SetScript("OnLeave", function() GameTooltip:Hide() end)
+-- Drag and drop to sort a list in the options. While dragging, a gold line
+-- shows where the item will land; dropping moves it there.
+--   items()   the frames in their order (rows top to bottom, tabs left to right)
+--   vertical  rows sort by height, tabs from left to right
+--   line      the marker, shown while dragging
+--   onDrop(from, to)
+local dragDriver = CreateFrame("Frame")
 
-    PanelButton(parent, "New", x + 154, y, 60, function() NewTrack() end)
-    local del = PanelButton(parent, "Delete", x + 218, y, 80, nil)
-    local armedAt -- a second click within 3 s deletes, so one stray click can't
-    del:SetScript("OnClick", function(self)
-        if armedAt and GetTime() - armedAt < 3 then
-            armedAt = nil
-            DeleteTrack()
-        else
-            armedAt = GetTime()
-            self:SetText("Sure?")
-            C_Timer.After(3, function()
-                if armedAt and GetTime() - armedAt >= 3 then
-                    armedAt = nil
-                    RefreshOptions()
+-- Where the dragged item lands among the others, from the pointer.
+local function DropSlot(items, dragged, vertical)
+    local cx, cy = GetCursorPosition()
+    local slot, others = 1, {}
+    for _, f in ipairs(items) do
+        if f ~= dragged then
+            others[#others + 1] = f
+            local scale = (f.GetEffectiveScale and f:GetEffectiveScale()) or 1
+            local x, y = f:GetCenter()
+            if x and y and cx and cy then
+                if vertical then
+                    if y > cy / scale then slot = slot + 1 end
+                elseif x < cx / scale then
+                    slot = slot + 1
                 end
-            end)
+            end
         end
-    end)
-
-    local nameLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    nameLabel:SetPoint("TOPLEFT", x + 4, y - 32)
-    nameLabel:SetText("Name")
-    -- No auto focus: an edit box with the focus takes every key press.
-    local box = TryCreate("EditBox", "ForagerTrackName", parent, { "InputBoxTemplate" })
-    box:SetSize(190, 20)
-    box:SetPoint("TOPLEFT", x + 52, y - 28)
-    box:SetAutoFocus(false)
-    if box.SetMaxLetters then box:SetMaxLetters(30) end
-    box:SetScript("OnEnterPressed", function(self) RenameTrack(self:GetText()) self:ClearFocus() RefreshOptions() end)
-    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() RefreshOptions() end)
-    box:SetScript("OnEditFocusLost", function(self) RenameTrack(self:GetText()) end)
-
-    local hint = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("TOPLEFT", x + 4, y - 56)
-    hint:SetWidth(COL - 20)
-    hint:SetJustifyH("LEFT")
-    hint:SetText("Tick a tracker to put it on the icons. On the icons, right-click one to leave it out of the rotation for now, and again to put it back.")
-    OptionCheck(parent, "Show every track's icons at once", "showAllTracks", x, y - 86, function() UpdateBar() end)
-    AlignButton(parent, x, y - 118)
-    OptionSlider(parent, "Gap between tracks", "trackGap", 0, 40, x, y - 150, " px", 1, function() LayoutBar() UpdateBar() end)
-    OptionCheck(parent, "Move each track's row on its own", "tracksApart", x, y - 196, function()
-        UpdateBar()
-        LayoutBar()
-        Print(db.tracksApart and "drag each track's row where you want it." or "the tracks' rows move together again.")
-    end)
-
-    optionRefreshers[#optionRefreshers + 1] = function()
-        local n = #db.tracks
-        pick:SetText(TrackName() .. (n > 1 and (" (" .. db.track .. "/" .. n .. ")") or ""))
-        if not armedAt then del:SetText("Delete") end
-        del:SetEnabled(n > 1)
-        if not (box.HasFocus and box:HasFocus()) then box:SetText(TrackName()) end
     end
+    return slot, others
 end
 
--- One row per tracking spell the character knows: tick it to rotate it, and
--- move it up or down to set the order.
+local function Sortable(handle, items, vertical, line, onDrop)
+    local from
+    handle:RegisterForDrag("LeftButton")
+    handle:SetScript("OnDragStart", function(self)
+        from = nil
+        for i, f in ipairs(items()) do
+            if f == self then from = i end
+        end
+        if not from then return end
+        dragDriver:SetScript("OnUpdate", function()
+            local slot, others = DropSlot(items(), self, vertical)
+            local at = others[slot]
+            line:ClearAllPoints()
+            if vertical then
+                if at then line:SetPoint("BOTTOMLEFT", at, "TOPLEFT", 0, 1)
+                else line:SetPoint("TOPLEFT", others[#others] or self, "BOTTOMLEFT", 0, -1) end
+            else
+                if at then line:SetPoint("TOPRIGHT", at, "TOPLEFT", -1, 0)
+                else line:SetPoint("TOPLEFT", others[#others] or self, "TOPRIGHT", 1, 0) end
+            end
+            line:Show()
+        end)
+    end)
+    handle:SetScript("OnDragStop", function(self)
+        dragDriver:SetScript("OnUpdate", nil)
+        line:Hide()
+        if not from then return end
+        local was = from
+        from = nil
+        local slot = DropSlot(items(), self, vertical)
+        if slot ~= was then onDrop(was, slot) end
+    end)
+end
+
+local INSET_W = COL - 4
+local editTrack -- the track whose tab is open in the options (a track table)
+
+-- The track the options show: the current one until another tab is clicked.
+local function EditTrack()
+    if not (editTrack and IndexOfTrack(editTrack)) then editTrack = db.tracks[db.track] end
+    return editTrack
+end
+
+-- One row per tracking spell the character knows, for the track whose tab is
+-- open: tick it to put it in that track. Drag a row by its name, or use the
+-- arrows, to change the order (the order is shared by every track).
 local function TrackerList(parent, x, y)
-    local rows = {}
+    local rows, handles = {}, {}
+    ns.trackerRows, ns.trackerHandles = rows, handles
     local empty = parent:CreateFontString(nil, "OVERLAY", "GameFontDisable")
     empty:SetPoint("TOPLEFT", x + 4, y - 4)
     empty:SetText("This character knows no tracking spells.")
+    local line = parent:CreateTexture(nil, "OVERLAY")
+    line:SetColorTexture(1, 0.82, 0, 0.9)
+    line:SetSize(INSET_W - x - 100, 2)
+    line:Hide()
+    local function Handles()
+        local out = {}
+        for i, h in ipairs(handles) do
+            if rows[i].inUse then out[#out + 1] = h end
+        end
+        return out
+    end
     optionRefreshers[#optionRefreshers + 1] = function()
         local s = Scan()
+        local t = EditTrack()
         empty:SetShown(#s.list == 0)
         for i, e in ipairs(s.list) do
             local row = rows[i]
@@ -1743,22 +1839,89 @@ local function TrackerList(parent, x, y)
                 row.label:ClearAllPoints()
                 row.label:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
                 row:SetScript("OnClick", function(self)
-                    db.rotation[self.key] = self:GetChecked() and true or nil
+                    EditTrack().rotation[self.key] = self:GetChecked() and true or nil
                     UpdateBar()
                     RefreshOptions()
                 end)
+                -- The icon and name are a handle: click to tick, drag to sort.
+                local h = CreateFrame("Button", nil, parent)
+                h:SetPoint("TOPLEFT", row, "TOPRIGHT", 0, 0)
+                h:SetSize(INSET_W - x - 24 - 116, 24)
+                local hl = h:CreateTexture(nil, "HIGHLIGHT")
+                hl:SetAllPoints()
+                hl:SetColorTexture(1, 1, 1, 0.06)
+                h:SetScript("OnClick", function()
+                    row:SetChecked(not row:GetChecked())
+                    local fn = row:GetScript("OnClick")
+                    if fn then fn(row) end
+                end)
+                h:SetScript("OnEnter", function(self)
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(row.name or "", 1, 1, 1)
+                    GameTooltip:AddLine("Click to tick or untick it for this track. Drag it up or down to change the order.", 0.8, 0.8, 0.8, true)
+                    GameTooltip:Show()
+                end)
+                h:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                Sortable(h, Handles, true, line, function(from, to)
+                    local e2 = Scan().list[from]
+                    if e2 and MoveTrackerTo(e2.key, to) then
+                        UpdateBar()
+                        RefreshOptions()
+                    end
+                end)
+                row.handle = h
+                handles[i] = h
+                -- Seconds this tracker stays up in this track; empty is
+                -- Time between switches, shown grayed in the box.
+                local dur = TryCreate("EditBox", nil, parent, { "InputBoxTemplate" })
+                dur:SetSize(30, 18)
+                dur:SetPoint("TOPLEFT", parent, "TOPLEFT", INSET_W - 104, y - (i - 1) * 26 - 3)
+                dur:SetAutoFocus(false)
+                if dur.SetNumeric then dur:SetNumeric(true) end
+                if dur.SetMaxLetters then dur:SetMaxLetters(3) end
+                if dur.SetJustifyH then dur:SetJustifyH("CENTER") end
+                dur.hint = dur:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+                dur.hint:SetPoint("CENTER")
+                local function Save(self)
+                    local t = EditTrack()
+                    t.durations = t.durations or {}
+                    local n = tonumber(self:GetText() or "")
+                    t.durations[row.key] = (n and n >= 1) and math.min(600, math.floor(n)) or nil
+                    UpdateBar()
+                end
+                dur:SetScript("OnEnterPressed", function(self) Save(self) self:ClearFocus() RefreshOptions() end)
+                dur:SetScript("OnEscapePressed", function(self) self:ClearFocus() RefreshOptions() end)
+                dur:SetScript("OnEditFocusLost", function(self) Save(self) RefreshOptions() end)
+                dur:SetScript("OnEditFocusGained", function(self) self.hint:Hide() end)
+                dur:SetScript("OnEnter", function(self)
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(row.name or "", 1, 1, 1)
+                    GameTooltip:AddLine("Seconds to keep it up before switching to the next one, in this track. Leave it empty for Time between switches (" .. db.delay .. " s).", 0.8, 0.8, 0.8, true)
+                    GameTooltip:Show()
+                end)
+                dur:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                row.dur = dur
                 row.up = OrderArrow(parent, "top", "Move up", function() return row.key end, -1)
-                row.up:SetPoint("TOPLEFT", parent, "TOPLEFT", x + COL - 60, y - (i - 1) * 26 - 6)
+                row.up:SetPoint("TOPLEFT", parent, "TOPLEFT", INSET_W - 62, y - (i - 1) * 26 - 6)
                 row.down = OrderArrow(parent, "bottom", "Move down", function() return row.key end, 1)
                 row.down:SetPoint("LEFT", row.up, "RIGHT", 6, 0)
                 rows[i] = row
             end
-            row.key = e.key
+            row.key, row.name, row.inUse = e.key, e.name, true
             row.icon:SetTexture(e.texture or ICON)
             row.label:SetText(e.name .. (e.alongside and "  |cff9d9d9d(kept on)|r" or "")
-                .. (e.skipped and "  |cff9d9d9d(left out)|r" or "") .. (e.active and "  |cff7fd96a(on)|r" or ""))
-            row:SetChecked(InRotation(e.key))
+                .. (t.skipped[e.key] and "  |cff9d9d9d(left out)|r" or "") .. (e.active and "  |cff7fd96a(on)|r" or ""))
+            row:SetChecked(t.rotation[e.key] == true)
             row:Show()
+            row.handle:Show()
+            -- Trackers kept on alongside never take a turn, so they have no time.
+            local d = t.durations and t.durations[e.key]
+            row.dur:SetShown(not e.alongside)
+            if not (row.dur.HasFocus and row.dur:HasFocus()) then
+                row.dur:SetText(d and tostring(d) or "")
+                row.dur.hint:SetText(tostring(db.delay))
+                row.dur.hint:SetShown(d == nil)
+            end
             row.up:Show()
             row.down:Show()
             row.up:SetEnabled(i > 1)
@@ -1767,10 +1930,223 @@ local function TrackerList(parent, x, y)
             row.down:SetAlpha(i < #s.list and 1 or 0.3)
         end
         for i = #s.list + 1, #rows do
+            rows[i].inUse = false
             rows[i]:Hide()
+            rows[i].handle:Hide()
+            rows[i].dur:Hide()
             rows[i].up:Hide()
             rows[i].down:Hide()
         end
+        parent:SetHeight(-y + math.max(#s.list, 1) * 26 + 10)
+    end
+end
+
+-- A tab's look, selected or not, drawn here: the game's own selected look
+-- disables the tab, and a disabled tab can't be dragged.
+local function TabLook(tab, selected, running)
+    -- Only the top tab's art swaps; a plain button's Left, Middle and Right are its own art.
+    local function S(region, on) if type(region) == "table" and region.SetShown then region:SetShown(on) end end
+    if not tab.isBare then
+        S(tab.Left, not selected) S(tab.Middle, not selected) S(tab.Right, not selected)
+        S(tab.LeftActive, selected) S(tab.MiddleActive, selected) S(tab.RightActive, selected)
+    end
+    if tab.SetNormalFontObject and GameFontHighlightSmall then
+        tab:SetNormalFontObject(selected and GameFontHighlightSmall or GameFontNormalSmall)
+    end
+    local y = tab.isTopTab and (selected and -4 or -8) or 0
+    local text = tab.Text or (tab.GetFontString and tab:GetFontString())
+    if type(text) == "table" and text.SetPoint then
+        text:ClearAllPoints()
+        text:SetPoint("CENTER", tab, "CENTER", running and 6 or 0, y)
+    end
+    if type(tab.check) == "table" then
+        tab.check:ClearAllPoints()
+        tab.check:SetPoint("LEFT", tab, "LEFT", 8, y)
+        tab.check:SetShown(running)
+    end
+    if tab.isBare then
+        if selected then tab:LockHighlight() else tab:UnlockHighlight() end
+    end
+end
+
+-- Tracks and trackers: settings for the tracks' rows on screen, then an
+-- inset with a tab per track (once there are two or more). The open tab shows
+-- its track's name, whether it runs, and its trackers.
+local function TracksArea(parent, x, y)
+    PanelButton(parent, "New track", x + COL - 100, y + 28, 92, function()
+        editTrack = NewTrack(nil, true)
+        RefreshOptions()
+    end)
+    -- Settings for every track's row, above the box that edits one track.
+    OptionCheck(parent, "Show every track's icons at once", "showAllTracks", x, y, function() UpdateBar() end)
+    AlignButton(parent, x, y - 32)
+    OptionSlider(parent, "Gap between tracks", "trackGap", 0, 40, x, y - 64, " px", 1, function() LayoutBar() UpdateBar() end)
+    OptionSlider(parent, "Gap between icons", "iconGap", 0, 20, x, y - 110, " px", 1, function() LayoutBar() UpdateBar() end)
+    OptionCheck(parent, "Move each track's row on its own", "tracksApart", x, y - 156, function()
+        UpdateBar()
+        LayoutBar()
+        Print(db.tracksApart and "drag each track's row where you want it." or "the tracks' rows move together again.")
+    end)
+
+    -- The inset, in the game's own inset art.
+    local inset, template = TryCreate("Frame", "ForagerTracksInset", parent, { "InsetFrameTemplate" })
+    inset:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y - 222)
+    inset:SetSize(INSET_W, 200)
+    if template == "bare" then
+        local bg = inset:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetColorTexture(0, 0, 0, 0.3)
+    end
+    ns.trackInset = inset
+
+    -- The tabs sit on the inset's top edge. Their holder carries the sizes the
+    -- game's tab code reads when a tab is shown.
+    local holder = CreateFrame("Frame", nil, parent)
+    holder:SetPoint("BOTTOMLEFT", inset, "TOPLEFT")
+    holder:SetSize(INSET_W, 30)
+    local tabLine = holder:CreateTexture(nil, "OVERLAY")
+    tabLine:SetColorTexture(1, 0.82, 0, 0.9)
+    tabLine:SetSize(2, 24)
+    tabLine:Hide()
+    local tabs = {}
+    ns.trackTabs = tabs
+    local function TabsList()
+        local out = {}
+        if #db.tracks > 1 then
+            for i = 1, #db.tracks do
+                if tabs[i] then out[#out + 1] = tabs[i] end
+            end
+        end
+        return out
+    end
+    local function Tab(i)
+        if tabs[i] then return tabs[i] end
+        local tab, tmpl = TryCreate("Button", "ForagerTrackTab" .. i, holder, { "PanelTopTabButtonTemplate", "UIPanelButtonTemplate" })
+        tab.isBare = tmpl ~= "PanelTopTabButtonTemplate"
+        if tab.isBare then tab:SetHeight(22) end
+        tab:RegisterForClicks("LeftButtonUp")
+        if HasAtlas("common-icon-checkmark") then
+            tab.check = tab:CreateTexture(nil, "OVERLAY")
+            tab.check:SetAtlas("common-icon-checkmark")
+            tab.check:SetSize(12, 12)
+            tab.check:Hide()
+        end
+        tab:SetScript("OnClick", function(self)
+            local t = db.tracks[self.index]
+            if t then editTrack = t end
+            RefreshOptions()
+        end)
+        tab:SetScript("OnEnter", function(self)
+            local t = db.tracks[self.index]
+            if not t then return end
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:SetText(t.name, 1, 1, 1)
+            if self.index == db.track then
+                GameTooltip:AddLine(db.enabled and "Running" or "The current track, paused", 0.5, 0.85, 0.42)
+            end
+            GameTooltip:AddLine("Click to show its trackers. Drag it sideways to change the order of the tracks.", 0.8, 0.8, 0.8, true)
+            GameTooltip:Show()
+        end)
+        tab:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        Sortable(tab, TabsList, false, tabLine, function(from, to) MoveTrackTo(from, to) end)
+        tabs[i] = tab
+        return tab
+    end
+
+    -- Inside: the track's name, Delete, whether it runs, and its trackers.
+    local nameLabel = inset:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    nameLabel:SetPoint("TOPLEFT", 10, -14)
+    nameLabel:SetText("Name")
+    -- No auto focus: an edit box with the focus takes every key press.
+    local box = TryCreate("EditBox", "ForagerTrackName", inset, { "InputBoxTemplate" })
+    box:SetSize(150, 20)
+    box:SetPoint("TOPLEFT", 58, -10)
+    box:SetAutoFocus(false)
+    if box.SetMaxLetters then box:SetMaxLetters(30) end
+    box:SetScript("OnEnterPressed", function(self) RenameTrack(self:GetText(), EditTrack()) self:ClearFocus() RefreshOptions() end)
+    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() RefreshOptions() end)
+    box:SetScript("OnEditFocusLost", function(self) RenameTrack(self:GetText(), EditTrack()) end)
+    local del = PanelButton(inset, "Delete", INSET_W - 94, -9, 82, nil)
+    local armedAt -- a second click within 3 s deletes, so one stray click can't
+    del:SetScript("OnClick", function(self)
+        if armedAt and GetTime() - armedAt < 3 then
+            armedAt = nil
+            DeleteTrack(EditTrack())
+            editTrack = nil
+            RefreshOptions()
+        else
+            armedAt = GetTime()
+            self:SetText("Sure?")
+            C_Timer.After(3, function()
+                if armedAt and GetTime() - armedAt >= 3 then
+                    armedAt = nil
+                    RefreshOptions()
+                end
+            end)
+        end
+    end)
+    -- This track's name over its icons, or not.
+    local showName = CheckButton(inset, "Show its name above its icons")
+    showName:SetPoint("TOPLEFT", 6, -36)
+    showName:SetScript("OnClick", function(self)
+        EditTrack().hideName = (not self:GetChecked()) or nil
+        UpdateBar()
+        RefreshOptions()
+    end)
+    ns.showNameCheck = showName
+    local state = inset:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    state:SetPoint("TOPLEFT", 10, -70)
+    local use = PanelButton(inset, "Use this track", INSET_W - 134, -64, 122, function()
+        local i = IndexOfTrack(EditTrack())
+        if i and i ~= db.track then UseTrack(i) end
+        RefreshOptions()
+    end)
+    local hint = inset:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hint:SetPoint("TOPLEFT", 10, -92)
+    hint:SetWidth(INSET_W - 20)
+    hint:SetJustifyH("LEFT")
+    hint:SetText("Tick a tracker to put it in this track, and type seconds beside it to keep it up longer or shorter than the rest. Drag a tracker, or a tab, to change the order.")
+    TrackerList(inset, 8, -134)
+
+    optionRefreshers[#optionRefreshers + 1] = function()
+        local t = EditTrack()
+        local n = #db.tracks
+        local many = n > 1
+        -- One tab per track, as wide as fits.
+        local w = math.max(44, math.min(110, math.floor((INSET_W - 12 - 3 * (n - 1)) / math.max(n, 1))))
+        holder.tabPadding, holder.minTabWidth, holder.maxTabWidth = 0, w, w
+        local left = 6
+        for i = 1, math.max(n, #tabs) do
+            if many and i <= n then
+                local tab = Tab(i)
+                tab.index = i
+                tab:SetText(db.tracks[i].name)
+                if PanelTemplates_TabResize and not tab.isBare then
+                    pcall(PanelTemplates_TabResize, tab, 0, w)
+                else
+                    tab:SetWidth(w)
+                end
+                tab:ClearAllPoints()
+                tab:SetPoint("BOTTOMLEFT", inset, "TOPLEFT", left, -2)
+                left = left + w + 3
+                TabLook(tab, db.tracks[i] == t, i == db.track)
+                tab:Show()
+            elseif tabs[i] then
+                tabs[i]:Hide()
+            end
+        end
+        if not (box.HasFocus and box:HasFocus()) then box:SetText(t.name) end
+        showName:SetChecked(not t.hideName)
+        showName:SetEnabled(many)
+        if not armedAt then del:SetText("Delete") end
+        del:SetEnabled(many)
+        local current = t == db.tracks[db.track]
+        if current then
+            state:SetText(db.enabled and "|cff7fd96aRunning|r" or "The current track, paused")
+        else
+            state:SetText("|cff9d9d9dNot running|r")
+        end
+        use:SetShown(not current)
     end
 end
 
@@ -2059,8 +2435,7 @@ local function BuildContent()
     LookSection(c, LEFT, -366)
 
     Header(c, "Tracks and trackers", LEFT, -490)
-    TrackSection(c, LEFT, -516)
-    TrackerList(c, LEFT, -746)
+    TracksArea(c, LEFT, -516)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
@@ -2098,18 +2473,32 @@ local function BuildContent()
     status:SetWidth(COL - 20)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)
-    optionRefreshers[#optionRefreshers + 1] = function() status:SetText(StatusText()) end
-    PanelButton(c, "Try the timer again", RIGHT, -792, 160, function()
+    -- The button and the hint sit under the status, however long it runs.
+    -- The button shows only while the timer has been refused: otherwise there
+    -- is nothing for it to do.
+    local retry = PanelButton(c, "Try the timer again", RIGHT, -792, 160, function()
         db.method, db.methodWhy, db.told = nil, nil, nil
         silentFails = 0
         Log("method reset from options")
+        Print("trying the timer again.")
         RefreshOptions()
     end)
+    ns.retryButton = retry
+    retry:ClearAllPoints()
+    retry:SetPoint("TOPLEFT", status, "BOTTOMLEFT", -2, -10)
     local hint = c:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("TOPLEFT", RIGHT + 4, -826)
     hint:SetWidth(COL - 20)
     hint:SetJustifyH("LEFT")
     hint:SetText("More key bindings (switch to the next tracker, open these options): Options > Keybindings > AddOns > Forager. /forager opens this page.")
+    local function UpdateStatus()
+        status:SetText(StatusText())
+        local fellBack = (db.method == "key" or db.method == "none") and db.methodWhy ~= "user"
+        retry:SetShown(fellBack)
+        hint:ClearAllPoints()
+        if fellBack then hint:SetPoint("TOPLEFT", retry, "BOTTOMLEFT", 2, -10)
+        else hint:SetPoint("TOPLEFT", status, "BOTTOMLEFT", 0, -12) end
+    end
+    optionRefreshers[#optionRefreshers + 1] = UpdateStatus
 
     -- Keeps the countdown live while the options are open.
     local elapsed = 0
@@ -2117,7 +2506,7 @@ local function BuildContent()
         elapsed = elapsed + dt
         if elapsed >= 0.5 then
             elapsed = 0
-            status:SetText(StatusText())
+            UpdateStatus()
         end
     end)
     return c
@@ -2510,6 +2899,17 @@ SlashCmdList.FORAGER = function(msg)
             SetTrackAlign(ALIGNS[i % #ALIGNS + 1])
         end
         Print(AlignText())
+    elseif cmd == "icongap" then
+        local n = tonumber(arg)
+        if n then
+            db.iconGap = math.max(0, math.min(20, math.floor(n + 0.5)))
+            LayoutBar()
+            UpdateBar()
+            RefreshOptions()
+            Print("gap between icons: " .. db.iconGap .. " px")
+        else
+            Print("usage: /forager icongap <0 to 20>")
+        end
     elseif cmd == "gap" then
         local n = tonumber(arg)
         if n then
