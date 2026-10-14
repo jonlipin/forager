@@ -60,6 +60,7 @@ local failing = {}     -- [key] = GetTime() until which a tracker that failed to
 local looting = false  -- the loot window is open
 local override         -- { key, name, why, before } while a situation calls for a tracker
 local ownedKey         -- a situational tracker Forager put on, which the rotation may replace
+local currentKey       -- the rotation tracker Forager last switched to, while it is on
 local mutedAt          -- GetTime() when Forager muted sound effects
 local Mute, Unmute     -- defined with Cast
 local RefreshOptions, UpdateMinimapButton, SetUpKeys, UpdateBar, Toggle -- defined below
@@ -89,14 +90,28 @@ local function InRotation(key)
     return db.rotation[key] == true
 end
 
+-- Trackers that stay on alongside the others instead of replacing them. On
+-- WoW Forever, Find Treasure (the dwarf racial) runs next to hunter tracking
+-- and Find Herbs or Find Minerals. Ticked, it is kept on rather than rotated.
+local ALONGSIDE = { [2481] = true }
+local ALONGSIDE_NAMES = { ["Find Treasure"] = true }
+
+local function Alongside(e)
+    return ALONGSIDE[e.key] or ALONGSIDE_NAMES[e.name] or false
+end
+
 -- Every tracking spell the character has, in the tracking menu's order.
---   s.list     { key, index, name, texture, active } per spell
+--   s.list     { key, index, name, texture, active, alongside } per spell
 --   s.byKey    the same, by key (the spell ID, or the name when there is none)
---   s.rotation the ones ticked to take part
---   s.active   key of the tracking spell that is on
---   s.other    name of a tracking spell that is on but not in the rotation
+--   s.on       [key] = true for every tracker that is on (more than one can be)
+--   s.rotation the ticked ones that take turns
+--   s.keep     the ticked ones that stay on alongside the rotation
+--   s.active   key of the rotation's tracker that is on: the one Forager last
+--              switched to while it is still on, else the first on in the list
+--   s.other    name of a tracker that is on, not ticked, and not one that
+--              stays on alongside the others (your own pick)
 local function Scan()
-    local s = { list = {}, byKey = {}, rotation = {} }
+    local s = { list = {}, byKey = {}, on = {}, rotation = {}, keep = {} }
     if not (C_Minimap and C_Minimap.GetNumTrackingTypes and C_Minimap.GetTrackingInfo) then return s end
     for i = 1, C_Minimap.GetNumTrackingTypes() do
         local info = C_Minimap.GetTrackingInfo(i)
@@ -107,12 +122,10 @@ local function Scan()
                     key = key, index = i, name = info.name or tostring(key),
                     texture = info.texture, active = info.active and true or false,
                 }
+                e.alongside = Alongside(e)
                 s.list[#s.list + 1] = e
                 s.byKey[key] = e
-                if e.active then
-                    s.active = key
-                    if not InRotation(key) then s.other = e.name end
-                end
+                if e.active then s.on[key] = true end
             end
         end
     end
@@ -121,7 +134,28 @@ local function Scan()
     for _, e in ipairs(s.list) do e.rank = rank[e.key] or (100000 + e.index) end
     table.sort(s.list, function(a, b) return a.rank < b.rank end)
     for _, e in ipairs(s.list) do
-        if InRotation(e.key) then s.rotation[#s.rotation + 1] = e end
+        if InRotation(e.key) then
+            if e.alongside then s.keep[#s.keep + 1] = e else s.rotation[#s.rotation + 1] = e end
+        end
+    end
+    -- Which tracker the rotation is on. When several are on at once, the one
+    -- Forager switched to last wins; reading "the last one on in the menu"
+    -- left the rotation stuck on a tracker that stays on (Find Treasure).
+    if currentKey and s.on[currentKey] and InRotation(currentKey) then
+        s.active = currentKey
+    else
+        for _, e in ipairs(s.rotation) do
+            if e.active then s.active = e.key break end
+        end
+    end
+    if not s.active then
+        for _, e in ipairs(s.list) do
+            if e.active and not e.alongside then
+                s.active = e.key
+                if not InRotation(e.key) then s.other = e.name end
+                break
+            end
+        end
     end
     return s
 end
@@ -236,8 +270,11 @@ local function Verify()
     if not a or a.done then return end
     a.done = true
     local s = Scan()
-    if mutedAt and s.active ~= a.target then Unmute() end
-    if s.active == a.target then
+    if mutedAt and not s.on[a.target] then Unmute() end
+    if s.on[a.target] then
+        if InRotation(a.target) and not (s.byKey[a.target] and s.byKey[a.target].alongside) then
+            currentKey = a.target
+        end
         silentFails = 0
         failing[a.target] = nil
         if db.method == nil and a.source == "timer" then
@@ -324,13 +361,13 @@ local function TryRestore()
     if UnitIsDeadOrGhost("player") then aliveAt = nil return end
     aliveAt = aliveAt or GetTime()
     local s = Scan()
-    if not db.restoreAfterDeath or s.active or GetTime() - aliveAt > 30 then
+    local key = db.lastTracked[UnitGUID("player") or ""]
+    if not db.restoreAfterDeath or (key and s.on[key]) or (not key and s.active) or GetTime() - aliveAt > 30 then
         deathAt, aliveAt = nil, nil
         return
     end
     if InCombatLockdown() or UnitAffectingCombat("player") or UnitOnTaxi("player") then return end
     if Momentary(s) or (attempt and not attempt.done) then return end
-    local key = db.lastTracked[UnitGUID("player") or ""]
     local e = key and s.byKey[key]
     if not e then
         deathAt, aliveAt = nil, nil
@@ -338,6 +375,23 @@ local function TryRestore()
     end
     Log("restoring " .. e.name .. " after death")
     Cast(e, "restore")
+end
+
+-- Ticked trackers that stay on alongside the rotation (Find Treasure) are
+-- put back whenever they are off, while Forager is running.
+local function KeepOn()
+    if not db.enabled or override then return end
+    if InCombatLockdown() or UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") or UnitOnTaxi("player") then return end
+    if attempt and not attempt.done then return end
+    local s = Scan()
+    if Momentary(s) then return end
+    for _, e in ipairs(s.keep) do
+        if not s.on[e.key] and not ((failing[e.key] or 0) > GetTime()) and not OnCooldown(e.key) then
+            Log("keeping " .. e.name .. " on")
+            Cast(e, "keep")
+            return
+        end
+    end
 end
 
 -- Trackers a situation calls for. Track Humanoids is a druid spell (Cat
@@ -397,7 +451,7 @@ local function UpdateSituation()
             Log("situation: " .. why .. ", using " .. e.name)
             if UpdateBar then UpdateBar() end
         end
-        if s.active == e.key then return end
+        if s.on[e.key] then return end
         if InCombatLockdown() or UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") or UnitOnTaxi("player") then return end
         if Busy() or OnCooldown(e.key) or (failing[e.key] or 0) > GetTime() then return end
         if attempt and not attempt.done then return end
@@ -417,9 +471,15 @@ local function UpdateSituation()
 end
 
 local function OnTrackingChanged()
-    local active = Scan().active
+    local s = Scan()
+    if attempt and not attempt.done and s.on[attempt.target] and InRotation(attempt.target)
+        and s.byKey[attempt.target] and not s.byKey[attempt.target].alongside then
+        currentKey = attempt.target
+        s = Scan()
+    end
+    local active = s.active
+    if mutedAt and attempt and s.on[attempt.target] then C_Timer.After(0.3, Unmute) end
     if active ~= lastActive then
-        if mutedAt and attempt and active == attempt.target then C_Timer.After(0.3, Unmute) end
         if active ~= ownedKey then ownedKey = nil end
         RememberTracker(active)
         if active then lastSwitch = GetTime() end
@@ -528,7 +588,14 @@ local function StatusText()
     local names = {}
     for _, e in ipairs(s.rotation) do names[#names + 1] = e.name end
     local lines = {
-        "Tracking: |cffffffff" .. (s.active and NameOf(s, s.active) or "nothing") .. "|r",
+        "Tracking: |cffffffff" .. (s.active and NameOf(s, s.active) or "nothing") .. "|r"
+            .. (function()
+                local extra = {}
+                for _, e in ipairs(s.list) do
+                    if e.active and e.alongside then extra[#extra + 1] = e.name end
+                end
+                return #extra > 0 and (", plus |cffffffff" .. table.concat(extra, ", ") .. "|r") or ""
+            end)(),
         "Rotating: |cffffffff" .. (#names > 0 and table.concat(names, ", ") or "nothing") .. "|r",
         "Switches " .. MethodText(),
     }
@@ -662,7 +729,10 @@ end
 -- when the timer can't switch.
 local function SwitchTo(key, source)
     local s = Scan()
-    if s.active == key then return end
+    if s.on[key] then
+        if InRotation(key) then currentKey = key end
+        return
+    end
     if InCombatLockdown() then Print("tracking can't be switched in combat.") return end
     local e = s.byKey[key]
     if not e then Print("this character doesn't know that tracking spell.") return end
@@ -845,7 +915,9 @@ UpdateBar = function()
     if not bar then BuildBar() end
     bar:Show()
 
-    local entries = s.rotation
+    local entries = {}
+    for _, e in ipairs(s.rotation) do entries[#entries + 1] = e end
+    for _, e in ipairs(s.keep) do entries[#entries + 1] = e end
     for i, e in ipairs(entries) do
         local b = TrackButton(i)
         if b.key ~= e.key then
@@ -857,11 +929,15 @@ UpdateBar = function()
 
     local left = math.ceil(db.delay - (GetTime() - lastSwitch))
     -- Nothing counts down while a switch is still landing.
-    local landing = attempt and not attempt.done and s.active ~= attempt.target
+    local landing = attempt and not attempt.done and not s.on[attempt.target]
     local nextEntry = (db.enabled and left > 0 and not landing and not Blocker(s)) and NextEntry(s)
     for i = 1, #entries do
         local b = trackButtons[i]
-        local on = s.active == b.key
+        -- A tracker kept on alongside glows while it is on; a rotation one
+        -- while it is the rotation's current tracker.
+        local e = s.byKey[b.key]
+        local on
+        if e and e.alongside then on = s.on[b.key] == true else on = s.active == b.key end
         if on ~= b.lit then
             b.lit = on
             -- Forager_Skins.lua fades the glow in and out, and swaps in a round
@@ -895,7 +971,7 @@ UpdateBar = function()
         local active
         if db.sparkles and db.enabled then
             for i = 1, #entries do
-                if trackButtons[i].lit then active = trackButtons[i] end
+                if trackButtons[i].lit and trackButtons[i].key == s.active then active = trackButtons[i] end
             end
         end
         ns.UpdateSparkles(active)
@@ -1076,7 +1152,7 @@ local function TrackerList(parent, x, y)
             end
             row.key = e.key
             row.icon:SetTexture(e.texture or ICON)
-            row.label:SetText(e.name .. (e.active and "  |cff7fd96a(on)|r" or ""))
+            row.label:SetText(e.name .. (e.alongside and "  |cff9d9d9d(kept on)|r" or "") .. (e.active and "  |cff7fd96a(on)|r" or ""))
             row:SetChecked(InRotation(e.key))
             row:Show()
             row.up:Show()
@@ -1897,6 +1973,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             OnTrackingChanged()
             TryRestore()
             UpdateSituation()
+            KeepOn()
             if mutedAt and GetTime() - mutedAt > 2 then Unmute() end
             if db.method == nil or db.method == "timer" then TrySwitch("timer") end
             UpdateBar()

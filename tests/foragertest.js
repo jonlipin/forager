@@ -69,7 +69,9 @@ C_Minimap = {
     if T.blockAll or (T.blockTimer and not fromKey) then fire("ADDON_ACTION_BLOCKED", "Forager", "UNKNOWN()") return end
     T.sfxAtCast = T.cvars.Sound_EnableSFX
     local function land()
-      for _, t in ipairs(T.tracking) do if t.type == "spell" then t.active = false end end
+      if T.tracking[i].spellID ~= 2481 then
+        for _, t in ipairs(T.tracking) do if t.type == "spell" and t.spellID ~= 2481 then t.active = false end end
+      end
       T.tracking[i].active = on
       T.switches = (T.switches or 0) + 1
       T.landedAt = T.now
@@ -1876,5 +1878,53 @@ do
 end
 `);
 
+const TREASURE = `
+  T.tracking[#T.tracking + 1] = { name = "Find Treasure", spellID = 2481, type = "spell", active = false, texture = 9 }
+`
+run('Find Treasure on but not ticked does not hold up the rotation', TREASURE + `
+  T.tracking[#T.tracking].active = true T.fire("MINIMAP_UPDATE_TRACKING")
+  T.advance(6.5) check(T.active() == "Find Herbs" or T.tracking[1].active, "herbs on next to treasure")
+  check(T.tracking[1].active and T.tracking[#T.tracking].active, "both on")
+  T.advance(6.5) check(T.tracking[2].active and not T.tracking[1].active, "then minerals, rotation going")
+  check(T.tracking[#T.tracking].active, "treasure left alone")
+`);
+run('Find Treasure ticked is kept on and the rotation keeps going', TREASURE + `
+  ForagerDB.rotation[2481] = true
+  T.advance(2) check(T.tracking[#T.tracking].active, "treasure put on")
+  local seen = {}
+  for n = 1, 6 do
+    T.advance(6.5)
+    if T.tracking[1].active then seen.herbs = (seen.herbs or 0) + 1 end
+    if T.tracking[2].active then seen.minerals = (seen.minerals or 0) + 1 end
+    check(T.tracking[#T.tracking].active, "treasure still on, round " .. n)
+  end
+  check((seen.herbs or 0) >= 2 and (seen.minerals or 0) >= 2, "herbs and minerals both keep coming round: " .. tostring(seen.herbs) .. "/" .. tostring(seen.minerals))
+  check(ForagerDB.method == "timer", "no switch read as failed, method " .. tostring(ForagerDB.method))
+`);
+run('a kept-on tracker comes back if it drops off', TREASURE + `
+  ForagerDB.rotation[2481] = true
+  T.advance(2) T.tracking[#T.tracking].active = false T.fire("MINIMAP_UPDATE_TRACKING")
+  T.advance(3) check(T.tracking[#T.tracking].active, "treasure back on")
+  SlashCmdList.FORAGER("off") T.tracking[#T.tracking].active = false
+  T.advance(5) check(not T.tracking[#T.tracking].active, "not while paused")
+`);
+run('a tracker that unexpectedly stays on does not stick the rotation', `
+  ForagerDB.rotation[1494] = true
+  -- Track Beasts behaving like Find Treasure: nothing turns it off
+  local real = C_Minimap.SetTracking
+  C_Minimap.SetTracking = function(i, on)
+    local beasts = T.tracking[3].active
+    real(i, on)
+    if beasts then T.tracking[3].active = true end
+  end
+  local herbs, minerals = 0, 0
+  for n = 1, 9 do
+    T.advance(6.5)
+    if T.tracking[1].active then herbs = herbs + 1 end
+    if T.tracking[2].active then minerals = minerals + 1 end
+  end
+  check(herbs >= 2 and minerals >= 2, "still rotating: herbs " .. herbs .. ", minerals " .. minerals)
+  check(ForagerDB.method == "timer", "no switch read as failed")
+`);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

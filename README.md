@@ -7,7 +7,7 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
 ## Features
 
 - **Auto tracking rotation.** Switches tracking every 2 to 60 seconds (you choose) while you're out of combat.
-- **Any tracking spell, in your order.** Find Herbs and Find Minerals are on by default. Tick any other tracker your character knows to add it, and use the up and down arrows to set the order they rotate in.
+- **Any tracking spell, in your order.** Find Herbs and Find Minerals are on by default. Tick any other tracker your character knows to add it, and use the up and down arrows to set the order they rotate in. Find Treasure works alongside the others, so ticked it simply stays on while the rest take turns.
 - **Tracker icons on screen.**
   - The tracker that's on glows like a proc on your action bars, with optional sparkles around it (eight effects, size and intensity sliders).
   - The next one shows a cooldown swipe and the seconds until it switches.
