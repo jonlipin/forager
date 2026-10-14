@@ -1548,7 +1548,7 @@ if (!EUI_ON) {
     UIParent.GetHeight = function() return 768 end
   ` + OPEN + `
     local scale = rawget(ForagerOptions, "scale")
-    check(scale and math.abs(scale - (768 - 40) / (1210 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
+    check(scale and math.abs(scale - (768 - 40) / (1240 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
   `);
   run('drawn sparkles follow the size and intensity', SPARK_HELPERS + `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -2462,6 +2462,17 @@ run('the status button shows only when the timer was refused', OPEN + FIND + PRI
   retry.scripts.OnClick(retry)
   check(ForagerDB.method == nil and T.printed("trying the timer again"), "it works and says so")
   check(rawget(retry, "shown") == false, "then hides")
+`);
+run('All tracks has its own section above Tracks and trackers, with Show all tracks together first', OPEN + `
+  local function y(f) local p = rawget(f, "_point") return p and p[#p] end
+  local all, tracks = T.string("All tracks"), T.string("Tracks and trackers")
+  local show = T.string("Show all tracks together")
+  check(all and tracks and show, "the section, the edit area and the renamed checkbox are there")
+  check(T.string("Show every track's icons at once") == nil, "the old name is gone")
+  local box
+  for _, f in ipairs(T.frames) do if rawget(f, "label") == show then box = f end end
+  check(y(all) > y(box) and y(box) > y(tracks), "All tracks, then its first setting, then Tracks and trackers")
+  check(y(NS.trackInset) < y(tracks), "the edit box sits under Tracks and trackers")
 `);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

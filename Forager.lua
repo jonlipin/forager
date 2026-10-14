@@ -1507,7 +1507,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 1210
+local W, CONTENT_H = 680, 1240
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1972,13 +1972,10 @@ end
 -- Tracks and trackers: settings for the tracks' rows on screen, then an
 -- inset with a tab per track (once there are two or more). The open tab shows
 -- its track's name, whether it runs, and its trackers.
-local function TracksArea(parent, x, y)
-    PanelButton(parent, "New track", x + COL - 100, y + 28, 92, function()
-        editTrack = NewTrack(nil, true)
-        RefreshOptions()
-    end)
-    -- Settings for every track's row, above the box that edits one track.
-    OptionCheck(parent, "Show every track's icons at once", "showAllTracks", x, y, function() UpdateBar() end)
+-- All tracks: the settings that apply to every track's row, in a section of
+-- their own above Tracks and trackers.
+local function AllTracksSection(parent, x, y)
+    OptionCheck(parent, "Show all tracks together", "showAllTracks", x, y, function() UpdateBar() end)
     AlignButton(parent, x, y - 32)
     OptionSlider(parent, "Gap between tracks", "trackGap", 0, 40, x, y - 64, " px", 1, function() LayoutBar() UpdateBar() end)
     OptionSlider(parent, "Gap between icons", "iconGap", 0, 20, x, y - 110, " px", 1, function() LayoutBar() UpdateBar() end)
@@ -1987,10 +1984,19 @@ local function TracksArea(parent, x, y)
         LayoutBar()
         Print(db.tracksApart and "drag each track's row where you want it." or "the tracks' rows move together again.")
     end)
+end
+
+-- Tracks and trackers: New track on the header's line, then the tabs and the
+-- box that edits one track. y is the top of the tabs' line.
+local function TracksArea(parent, x, y)
+    PanelButton(parent, "New track", x + COL - 100, y + 28, 92, function()
+        editTrack = NewTrack(nil, true)
+        RefreshOptions()
+    end)
 
     -- The inset, in the game's own inset art.
     local inset, template = TryCreate("Frame", "ForagerTracksInset", parent, { "InsetFrameTemplate" })
-    inset:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y - 222)
+    inset:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y - 30)
     inset:SetSize(INSET_W, 200)
     if template == "bare" then
         local bg = inset:CreateTexture(nil, "BACKGROUND")
@@ -2434,8 +2440,11 @@ local function BuildContent()
     Header(c, "Look", LEFT, -340)
     LookSection(c, LEFT, -366)
 
-    Header(c, "Tracks and trackers", LEFT, -490)
-    TracksArea(c, LEFT, -516)
+    Header(c, "All tracks", LEFT, -490)
+    AllTracksSection(c, LEFT, -516)
+
+    Header(c, "Tracks and trackers", LEFT, -710)
+    TracksArea(c, LEFT, -736)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
