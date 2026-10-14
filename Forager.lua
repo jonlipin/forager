@@ -1098,11 +1098,15 @@ local function LayoutBar()
                 if db.barVertical then b:SetPoint("TOP", slot.row, "TOP", 0, -offset)
                 else b:SetPoint("LEFT", slot.row, "LEFT", offset, 0) end
             end
+            -- The play / stop button sits after the track's icons, or before
+            -- them when the track puts it first (left, or top when stacked).
+            local t = slot.track and db.tracks[slot.track]
+            local first = t and t.playFirst
             for i, b in ipairs(slot.buttons) do
                 b:SetShown(i <= n)
-                if i <= n then Put(b, i) end
+                if i <= n then Put(b, first and i + 1 or i) end
             end
-            Put(slot.pause, n + 1)
+            Put(slot.pause, first and 1 or n + 1)
             slot.label:SetShown(Named(slot))
         end
     end
@@ -1407,7 +1411,9 @@ UpdateBar = function()
     local layoutKey = table.concat(shape, ",") .. (db.barVertical and "v" or "h") .. #db.tracks
         .. (db.trackAlign or "start") .. (db.trackGap or 12) .. (RowsApart() and "apart" or "")
         .. table.concat(list, ",") .. "g" .. (db.iconGap or GAP)
-    for _, ti in ipairs(list) do layoutKey = layoutKey .. (db.tracks[ti].hideName and "x" or "n") end
+    for _, ti in ipairs(list) do
+        layoutKey = layoutKey .. (db.tracks[ti].hideName and "x" or "n") .. (db.tracks[ti].playFirst and "p" or "q")
+    end
     if barLayoutKey ~= layoutKey then
         barLayoutKey = layoutKey
         LayoutBar()
@@ -2100,6 +2106,27 @@ local function TracksArea(parent, x, y)
         RefreshOptions()
     end)
     ns.showNameCheck = showName
+    -- This track's play / stop button: right of its icons or left of them
+    -- (bottom or top when the icons are stacked vertically).
+    local function PlaySideText(t)
+        if db.barVertical then return "Play: " .. (t.playFirst and "top" or "bottom") end
+        return "Play: " .. (t.playFirst and "left" or "right")
+    end
+    local playSide = PanelButton(inset, "", INSET_W - 104, -37, 92, function()
+        local t = EditTrack()
+        t.playFirst = (not t.playFirst) or nil
+        UpdateBar()
+        RefreshOptions()
+    end)
+    playSide:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Play / stop button", 1, 1, 1)
+        GameTooltip:AddLine("Where this track's play / stop button sits: after its icons (on the right, or at the bottom when they are stacked vertically) or before them (on the left, or at the top). Each track has its own.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Click to switch sides.", 0.6, 0.6, 0.6, true)
+        GameTooltip:Show()
+    end)
+    playSide:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    ns.playSideButton = playSide
     local state = inset:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     state:SetPoint("TOPLEFT", 10, -70)
     local use = PanelButton(inset, "Use this track", INSET_W - 134, -64, 122, function()
@@ -2144,6 +2171,7 @@ local function TracksArea(parent, x, y)
         if not (box.HasFocus and box:HasFocus()) then box:SetText(t.name) end
         showName:SetChecked(not t.hideName)
         showName:SetEnabled(many)
+        playSide:SetText(PlaySideText(t))
         if not armedAt then del:SetText("Delete") end
         del:SetEnabled(many)
         local current = t == db.tracks[db.track]

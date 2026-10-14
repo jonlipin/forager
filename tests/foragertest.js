@@ -2474,5 +2474,28 @@ run('All tracks has its own section above Tracks and trackers, with Show all tra
   check(y(all) > y(box) and y(box) > y(tracks), "All tracks, then its first setting, then Tracks and trackers")
   check(y(NS.trackInset) < y(tracks), "the edit box sits under Tracks and trackers")
 `);
+run('each track puts its play button on the right or the left of its icons', OPEN + `
+  ForagerDB.rotation[1494] = true
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[1494] = true ForagerDB.rotation[5225] = true
+  SlashCmdList.FORAGER("track 1")
+  T.advance(0.5)
+  local function x(f) local p = rawget(f, "_point") return p[#p - 1] end
+  check(x(ForagerSlot2Pause) == 2 * 42, "Hunting's play button after its two icons: " .. tostring(x(ForagerSlot2Pause)))
+  ForagerTrackTab2.scripts.OnClick(ForagerTrackTab2)
+  local b = NS.playSideButton
+  check(rawget(b, "text") == "Play: right", "the button says where it is: " .. tostring(rawget(b, "text")))
+  b.scripts.OnClick(b)
+  check(ForagerDB.tracks[2].playFirst == true, "Hunting puts it first")
+  T.advance(0.3)
+  check(x(ForagerSlot2Pause) == 0, "now on the left")
+  check(x(ForagerSlot2Button1) == 42, "its icons after it: " .. tostring(x(ForagerSlot2Button1)))
+  check(x(ForagerPauseButton) == 3 * 42, "track 1's play button stays on the right: " .. tostring(x(ForagerPauseButton)))
+  check(rawget(b, "text") == "Play: left", "the button follows")
+  ForagerDB.barVertical = true T.advance(0.3) ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(b, "text") == "Play: top", "stacked vertically it says top: " .. tostring(rawget(b, "text")))
+  local p = rawget(ForagerSlot2Pause, "_point")
+  check(p[1] == "TOP" and p[#p] == 0, "and sits at the top of its column")
+`);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

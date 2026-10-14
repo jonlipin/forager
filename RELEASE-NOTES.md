@@ -1,4 +1,3 @@
-## 1.13.1 - 2026-10-14
+## 1.13.2 - 2026-10-14
 
-- The settings that apply to every track now have their own All tracks section, above Tracks and trackers: Show all tracks together, the alignment, the gap between tracks, the gap between icons, and moving each track's row on its own. Tracks and trackers keeps New track, the tabs and the box that edits one track.
-- "Show every track's icons at once" is now called "Show all tracks together".
+- Each track can put its play / stop button on the left or the right of its icons (at the top or the bottom when they are stacked vertically). Use the Play button in that track's tab under Tracks and trackers; every track has its own.
