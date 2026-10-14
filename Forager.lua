@@ -991,12 +991,15 @@ local POINT_OFFSET = {
     CENTER = { 0, 0 }, LEFT = { -0.5, 0 }, RIGHT = { 0.5, 0 }, TOP = { 0, 0.5 }, BOTTOM = { 0, -0.5 },
 }
 
-local function HoldPoint()
-    local align = db.trackAlign or "start"
-    if db.barVertical then
+local function HoldPointFor(vertical, align)
+    if vertical then
         return (align == "end" and "BOTTOM") or (align == "center" and "CENTER") or "TOP"
     end
     return (align == "end" and "RIGHT") or (align == "center" and "CENTER") or "LEFT"
+end
+
+local function HoldPoint()
+    return HoldPointFor(db.barVertical, db.trackAlign or "start")
 end
 
 -- A saved spot { x, y, point } in UIParent units, held by `want` instead,
@@ -1045,16 +1048,66 @@ end
 -- play / stop button. Rows stack downward, or sit side by side when the icons
 -- are stacked vertically. One track alone looks as it always did.
 -- Every track's row moves on its own (with more than one row on show).
+-- Move Tracks Separately: every track's row has its own spot on screen, and
+-- its own direction, alignment and icon gap, set in its tab. It needs Show all
+-- tracks together.
 local function RowsApart()
-    return db.tracksApart and db.showAllTracks and #db.tracks > 1
+    return (db.tracksApart and db.showAllTracks) and true or false
 end
 
--- A row dragged on its own keeps its center, in UIParent units like the bar's.
+-- A track's direction, alignment and icon gap: its own while tracks move
+-- separately, else the shared ones in All tracks.
+local function RowVertical(t)
+    if RowsApart() and t and t.vertical ~= nil then return t.vertical end
+    return db.barVertical and true or false
+end
+
+local function RowAlign(t)
+    if RowsApart() and t and t.align then return t.align end
+    return db.trackAlign or "start"
+end
+
+local function RowIconGap(t)
+    if RowsApart() and t and t.iconGap then return t.iconGap end
+    return db.iconGap or GAP
+end
+
+local function RowHoldPoint(t)
+    return HoldPointFor(RowVertical(t), RowAlign(t))
+end
+
+-- A row dragged on its own keeps its spot, held by its own side.
 local function SaveRowPosition(slot)
     local t = db.tracks[slot.track]
     if not t then return end
-    local spot = SpotOf(slot.row, HoldPoint())
+    local spot = SpotOf(slot.row, RowHoldPoint(t))
     if spot then t.pos = spot end
+end
+
+-- A track's icons along its row, with its play / stop button after them, or
+-- before them when the track puts it first.
+local function PutRow(slot, n, vertical, igap)
+    local t = slot.track and db.tracks[slot.track]
+    local first = t and t.playFirst
+    local function Put(b, i)
+        local offset = (i - 1) * (SIZE + igap)
+        b:ClearAllPoints()
+        if vertical then b:SetPoint("TOP", slot.row, "TOP", 0, -offset)
+        else b:SetPoint("LEFT", slot.row, "LEFT", offset, 0) end
+    end
+    for i, b in ipairs(slot.buttons) do
+        b:SetShown(i <= n)
+        if i <= n then Put(b, first and i + 1 or i) end
+    end
+    Put(slot.pause, first and 1 or n + 1)
+end
+
+-- The track's name over its row, on its lined-up side.
+local function PlaceLabel(slot, vertical, align)
+    slot.label:ClearAllPoints()
+    if not vertical and align == "end" then slot.label:SetPoint("BOTTOMRIGHT", slot.row, "TOPRIGHT", 0, 3)
+    elseif not vertical and align == "center" then slot.label:SetPoint("BOTTOM", slot.row, "TOP", 0, 3)
+    else slot.label:SetPoint("BOTTOMLEFT", slot.row, "TOPLEFT", 0, 3) end
 end
 
 local function LayoutBar()
@@ -1063,18 +1116,58 @@ local function LayoutBar()
     local views = barViews
     local named = #db.tracks > 1
     -- A track's name shows over its row unless that track hides it; a row
-    -- without one moves up into the space. Columns keep one line for names.
+    -- without one moves up into the space.
     local function Named(slot)
         local t = slot.track and db.tracks[slot.track]
         return named and not (t and t.hideName)
     end
+    local gap = db.trackGap or 12
+
+    if RowsApart() then
+        -- Every row on its own: its track's direction, icon gap and held side,
+        -- at its own spot. A row without a spot yet starts under the others
+        -- and keeps that spot from then on.
+        local scale = bar:GetScale()
+        local at = 0
+        for j, slot in ipairs(slots) do
+            local v = views[j]
+            slot.row:SetShown(v ~= nil)
+            if v then
+                local t = db.tracks[slot.track]
+                local vertical, igap, align = RowVertical(t), RowIconGap(t), RowAlign(t)
+                local n = v.count
+                local long = SIZE * (n + 1) + igap * n
+                if vertical then slot.row:SetSize(SIZE, long) else slot.row:SetSize(long, SIZE) end
+                PutRow(slot, n, vertical, igap)
+                PlaceLabel(slot, vertical, align)
+                slot.label:SetShown(Named(slot))
+                local lh = Named(slot) and 16 or 0
+                local want = HoldPointFor(vertical, align)
+                slot.row:ClearAllPoints()
+                if t.pos then
+                    t.pos = HeldBy(t.pos, want, slot.row)
+                    slot.row:SetPoint(want, UIParent, "BOTTOMLEFT", t.pos[1] / scale, t.pos[2] / scale)
+                else
+                    slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, -(at + lh))
+                    local spot = SpotOf(slot.row, want)
+                    if spot then t.pos = spot end
+                end
+                at = at + (vertical and long or SIZE) + lh + gap
+            end
+        end
+        bar:SetSize(SIZE, SIZE)
+        PlaceBar()
+        return
+    end
+
+    -- Together: one block with the shared direction, icon gap and alignment.
+    local vertical = db.barVertical and true or false
+    local igap = db.iconGap or GAP
+    local align = db.trackAlign or "start"
     local LH = 0
     for j, slot in ipairs(slots) do
         if views[j] and Named(slot) then LH = 16 end
     end
-    local gap = db.trackGap or 12
-    local igap = db.iconGap or GAP
-    local align = db.trackAlign or "start"
     -- First the size of every row, then the bar's size, then where each row
     -- goes: rows of different lengths line up on one side (top or bottom
     -- for columns).
@@ -1085,7 +1178,7 @@ local function LayoutBar()
             count = count + 1
             local long = SIZE * (v.count + 1) + igap * v.count
             longs[j] = long
-            if db.barVertical then
+            if vertical then
                 across = across + SIZE + (count > 1 and gap or 0)
                 down = math.max(down, long + LH)
             else
@@ -1097,7 +1190,7 @@ local function LayoutBar()
     bar:SetSize(math.max(across, SIZE), math.max(down, SIZE))
 
     -- How far a row of length `long` sits from the line-up side's start.
-    local room = db.barVertical and (math.max(down, SIZE) - LH) or math.max(across, SIZE)
+    local room = vertical and (math.max(down, SIZE) - LH) or math.max(across, SIZE)
     local function Shift(long)
         if align == "end" then return room - long end
         if align == "center" then return (room - long) / 2 end
@@ -1110,52 +1203,48 @@ local function LayoutBar()
         if v then
             local n, long = v.count, longs[j]
             slot.row:ClearAllPoints()
-            slot.label:ClearAllPoints()
-            local own = RowsApart() and db.tracks[slot.track] and db.tracks[slot.track].pos
-            if db.barVertical then
+            if vertical then
                 slot.row:SetSize(SIZE, long)
                 slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", at, -(LH + Shift(long)))
-                slot.label:SetPoint("BOTTOMLEFT", slot.row, "TOPLEFT", 0, 3)
                 at = at + SIZE + gap
             else
                 slot.row:SetSize(long, SIZE)
                 local lh = Named(slot) and LH or 0
                 slot.row:SetPoint("TOPLEFT", bar, "TOPLEFT", Shift(long), -(at + lh))
-                -- The name sits over the row's lined-up side.
-                if align == "end" and not own then slot.label:SetPoint("BOTTOMRIGHT", slot.row, "TOPRIGHT", 0, 3)
-                elseif align == "center" and not own then slot.label:SetPoint("BOTTOM", slot.row, "TOP", 0, 3)
-                else slot.label:SetPoint("BOTTOMLEFT", slot.row, "TOPLEFT", 0, 3) end
                 at = at + SIZE + lh + gap
             end
-            -- Moved on its own: the row goes where it was left. Until it is
-            -- dragged, it stays where the joined layout put it.
-            if own then
-                local scale = bar:GetScale()
-                local want = HoldPoint()
-                own = HeldBy(own, want, slot.row)
-                db.tracks[slot.track].pos = own
-                slot.row:ClearAllPoints()
-                slot.row:SetPoint(want, UIParent, "BOTTOMLEFT", own[1] / scale, own[2] / scale)
-            end
-            local function Put(b, i)
-                local offset = (i - 1) * (SIZE + igap)
-                b:ClearAllPoints()
-                if db.barVertical then b:SetPoint("TOP", slot.row, "TOP", 0, -offset)
-                else b:SetPoint("LEFT", slot.row, "LEFT", offset, 0) end
-            end
-            -- The play / stop button sits after the track's icons, or before
-            -- them when the track puts it first (left, or top when stacked).
-            local t = slot.track and db.tracks[slot.track]
-            local first = t and t.playFirst
-            for i, b in ipairs(slot.buttons) do
-                b:SetShown(i <= n)
-                if i <= n then Put(b, first and i + 1 or i) end
-            end
-            Put(slot.pause, first and 1 or n + 1)
+            PutRow(slot, n, vertical, igap)
+            PlaceLabel(slot, vertical, align)
             slot.label:SetShown(Named(slot))
         end
     end
     PlaceBar()
+end
+
+-- Turns Move Tracks Separately on or off. Turning it on gives every track the
+-- shared direction, alignment and icon gap to start from (a track that had
+-- its own before keeps them), and every row stays where it is on screen.
+local function SetSeparate(on)
+    db.tracksApart = on and true or false
+    if on then
+        for _, t in ipairs(db.tracks) do
+            if t.vertical == nil then t.vertical = db.barVertical and true or false end
+            t.align = t.align or db.trackAlign or "start"
+            t.iconGap = t.iconGap or db.iconGap or GAP
+        end
+        if bar and db.showAllTracks then
+            for j, slot in ipairs(slots) do
+                local t = slot.track and db.tracks[slot.track]
+                if t and not t.pos and barViews[j] then
+                    t.pos = SpotOf(slot.row, HoldPointFor(t.vertical, t.align))
+                end
+            end
+        end
+    end
+    Log("move tracks separately " .. (db.tracksApart and "on" or "off"))
+    if UpdateBar then UpdateBar() end
+    LayoutBar()
+    if RefreshOptions then RefreshOptions() end
 end
 
 local function ResetBarPosition()
@@ -1457,7 +1546,11 @@ UpdateBar = function()
         .. (db.trackAlign or "start") .. (db.trackGap or 12) .. (RowsApart() and "apart" or "")
         .. table.concat(list, ",") .. "g" .. (db.iconGap or GAP)
     for _, ti in ipairs(list) do
-        layoutKey = layoutKey .. (db.tracks[ti].hideName and "x" or "n") .. (db.tracks[ti].playFirst and "p" or "q")
+        local t = db.tracks[ti]
+        layoutKey = layoutKey .. (t.hideName and "x" or "n") .. (t.playFirst and "p" or "q")
+        if RowsApart() then
+            layoutKey = layoutKey .. (t.vertical and "V" or "H") .. tostring(t.align) .. tostring(t.iconGap)
+        end
     end
     if barLayoutKey ~= layoutKey then
         barLayoutKey = layoutKey
@@ -1526,7 +1619,7 @@ UpdateBar = function()
         if #db.tracks > 1 then
             label.text:SetText(t.name)
             if current then label.text:SetTextColor(1, 0.82, 0) else label.text:SetTextColor(0.75, 0.75, 0.75) end
-            if db.barVertical then
+            if RowVertical(t) then
                 label.text:SetWidth(SIZE + GAP * 2)
                 label:SetWidth(SIZE + GAP * 2)
             else
@@ -1636,7 +1729,7 @@ local function OptionSlider(parent, label, key, minV, maxV, x, y, unit, step, af
         slider.syncing = false
         value:SetText(shown .. unit)
     end
-    return slider, caption, value
+    return slider, caption, value, holder
 end
 
 local function Header(parent, text, x, y)
@@ -2023,31 +2116,142 @@ end
 -- Tracks and trackers: settings for the tracks' rows on screen, then an
 -- inset with a tab per track (once there are two or more). The open tab shows
 -- its track's name, whether it runs, and its trackers.
--- All tracks: the settings that apply to every track's row, in a section of
--- their own above Tracks and trackers.
-local function AllTracksSection(parent, x, y)
-    OptionCheck(parent, "Show all tracks together", "showAllTracks", x, y, function() UpdateBar() end)
-    AlignButton(parent, x, y - 32)
-    OptionSlider(parent, "Gap between tracks", "trackGap", 0, 40, x, y - 64, " px", 1, function() LayoutBar() UpdateBar() end)
-    OptionSlider(parent, "Gap between icons", "iconGap", 0, 20, x, y - 110, " px", 1, function() LayoutBar() UpdateBar() end)
-    OptionCheck(parent, "Move each track's row on its own", "tracksApart", x, y - 156, function()
-        UpdateBar()
-        LayoutBar()
-        Print(db.tracksApart and "drag each track's row where you want it." or "the tracks' rows move together again.")
-    end)
+-- Grays a checkbox (and its label) out, or back.
+local function GrayCheck(cb, on)
+    cb:SetEnabled(on)
+    if cb.label and cb.label.SetTextColor then
+        if on then cb.label:SetTextColor(1, 1, 1) else cb.label:SetTextColor(0.5, 0.5, 0.5) end
+    end
 end
 
--- Tracks and trackers: New track on the header's line, then the tabs and the
--- box that edits one track. y is the top of the tabs' line.
-local function TracksArea(parent, x, y)
-    PanelButton(parent, "New track", x + COL - 100, y + 28, 92, function()
+-- Grays a slider (and its caption and value) out, or back.
+local function GraySlider(slider, caption, value, on)
+    if slider.SetEnabled then pcall(slider.SetEnabled, slider, on) end
+    if caption and caption.SetTextColor then
+        if on then caption:SetTextColor(1, 1, 1) else caption:SetTextColor(0.5, 0.5, 0.5) end
+    end
+    if value and value.SetTextColor then
+        if on then value:SetTextColor(1, 0.82, 0) else value:SetTextColor(0.5, 0.5, 0.5) end
+    end
+end
+
+-- A slider for a value of the track whose tab is open.
+local function TrackSlider(parent, label, name, minV, maxV, x, y, unit, get, set)
+    local holder = CreateFrame("Frame", nil, parent)
+    holder:SetPoint("TOPLEFT", x + 4, y)
+    holder:SetSize(INSET_W - 20, 40)
+    local caption = holder:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    caption:SetPoint("TOPLEFT", 0, 0)
+    caption:SetText(label)
+    local value = holder:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+    value:SetPoint("TOPRIGHT", 0, -1)
+    local slider = TryCreate("Slider", name, holder, { "MinimalSliderTemplate", "UISliderTemplate", "OptionsSliderTemplate" })
+    slider:EnableMouseWheel(true)
+    slider:SetScript("OnMouseWheel", function(_, delta)
+        local sc = ns.optionsScroll
+        local handler = sc and sc:GetScript("OnMouseWheel")
+        if handler then handler(sc, delta) end
+    end)
+    for _, suffix in ipairs({ "Low", "High", "Text" }) do
+        local extra = _G[name .. suffix]
+        if extra then extra:SetText("") extra:Hide() end
+    end
+    if slider.SetOrientation then slider:SetOrientation("HORIZONTAL") end
+    slider:SetPoint("TOPLEFT", 2, -18)
+    slider:SetSize(INSET_W - 26, 18)
+    slider:SetMinMaxValues(minV, maxV)
+    if slider.SetValueStep then slider:SetValueStep(1) end
+    if slider.SetObeyStepOnDrag then pcall(slider.SetObeyStepOnDrag, slider, true) end
+    slider:SetScript("OnValueChanged", function(self, v)
+        v = math.floor(v + 0.5)
+        value:SetText(v .. unit)
+        if self.syncing then return end
+        set(v)
+    end)
+    optionRefreshers[#optionRefreshers + 1] = function()
+        local v = get()
+        slider.syncing = true
+        slider:SetValue(v)
+        slider.syncing = false
+        value:SetText(v .. unit)
+    end
+    return slider, holder
+end
+
+-- All tracks: the settings every track shares. Show all tracks together and
+-- Move Tracks Separately share the top line; Move Tracks Separately and Gap
+-- between tracks only matter with every track on show, so they are grayed out
+-- without it. While tracks move separately, Vertical, the alignment and Gap
+-- between icons move into each track's tab, and the section closes up.
+local function AllTracksSection(parent, x, y)
+    local box = CreateFrame("Frame", nil, parent)
+    box:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    box:SetSize(COL, 156)
+    ns.allTracksBox = box
+    OptionCheck(box, "Show all tracks together", "showAllTracks", 0, 0, function()
+        UpdateBar()
+        LayoutBar()
+        RefreshOptions()
+    end)
+    local separate = CheckButton(box, "Move Tracks Separately")
+    separate:SetPoint("TOPLEFT", 164, 0)
+    separate:SetScript("OnClick", function(self)
+        SetSeparate(self:GetChecked())
+        Print(db.tracksApart and "drag each track's row where you want it; each track's tab now has its own direction, alignment and icon gap."
+            or "the tracks' rows move together again, with the shared settings.")
+    end)
+    separate:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Move Tracks Separately", 1, 1, 1)
+        GameTooltip:AddLine("Drag each track's row wherever you want it. Each track then gets its own Vertical, alignment and Gap between icons, in its tab under Tracks and trackers.", 0.8, 0.8, 0.8, true)
+        if not db.showAllTracks then GameTooltip:AddLine("Needs Show all tracks together.", 1, 0.5, 0.25, true) end
+        GameTooltip:Show()
+    end)
+    separate:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    ns.separateCheck = separate
+    local vertical = OptionCheck(box, "Vertical", "barVertical", 0, -32, function()
+        LayoutBar()
+        UpdateBar()
+        RefreshOptions()
+    end)
+    ns.verticalCheck = vertical
+    local alignButton = AlignButton(box, 96, -32)
+    local gapTracks, gapTracksCaption, gapTracksValue, gapTracksHolder = OptionSlider(box, "Gap between tracks", "trackGap", 0, 40, 0, -64, " px", 1, function() LayoutBar() UpdateBar() end)
+    local gapIcons, _, _, gapIconsHolder = OptionSlider(box, "Gap between icons", "iconGap", 0, 20, 0, -110, " px", 1, function() LayoutBar() UpdateBar() end)
+    ns.gapTracksSlider, ns.gapIconsHolder = gapTracks, gapIconsHolder
+    optionRefreshers[#optionRefreshers + 1] = function()
+        local all = db.showAllTracks and true or false
+        local apart = RowsApart()
+        separate:SetChecked(db.tracksApart and true or false)
+        GrayCheck(separate, all)
+        vertical:SetShown(not apart)
+        alignButton:SetShown(not apart)
+        gapIconsHolder:SetShown(not apart)
+        gapTracksHolder:ClearAllPoints()
+        gapTracksHolder:SetPoint("TOPLEFT", box, "TOPLEFT", 4, apart and -32 or -64)
+        GraySlider(gapTracks, gapTracksCaption, gapTracksValue, all and not apart)
+        box:SetHeight(apart and 76 or 156)
+    end
+    return box
+end
+
+-- Tracks and trackers, under All tracks (and moving with it as it grows or
+-- closes up): New track on the header's line, then the tabs and the box that
+-- edits one track.
+local function TracksArea(parent, x, above)
+    local top = CreateFrame("Frame", nil, parent)
+    top:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -14)
+    top:SetSize(COL, 22)
+    ns.tracksTop = top
+    Header(top, "Tracks and trackers", 0, 0)
+    PanelButton(top, "New track", COL - 100, 2, 92, function()
         editTrack = NewTrack(nil, true)
         RefreshOptions()
     end)
 
     -- The inset, in the game's own inset art.
     local inset, template = TryCreate("Frame", "ForagerTracksInset", parent, { "InsetFrameTemplate" })
-    inset:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y - 30)
+    inset:SetPoint("TOPLEFT", top, "TOPLEFT", 0, -56)
     inset:SetSize(INSET_W, 200)
     if template == "bare" then
         local bg = inset:CreateTexture(nil, "BACKGROUND")
@@ -2110,7 +2314,7 @@ local function TracksArea(parent, x, y)
         return tab
     end
 
-    -- Inside: the track's name, Delete, whether it runs, and its trackers.
+    -- Inside: the track's name, Delete, its name on screen and play button side.
     local nameLabel = inset:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     nameLabel:SetPoint("TOPLEFT", 10, -14)
     nameLabel:SetText("Name")
@@ -2154,7 +2358,7 @@ local function TracksArea(parent, x, y)
     -- This track's play / stop button: right of its icons or left of them
     -- (bottom or top when the icons are stacked vertically).
     local function PlaySideText(t)
-        if db.barVertical then return "Play: " .. (t.playFirst and "top" or "bottom") end
+        if RowVertical(t) then return "Play: " .. (t.playFirst and "top" or "bottom") end
         return "Play: " .. (t.playFirst and "left" or "right")
     end
     local playSide = PanelButton(inset, "", INSET_W - 104, -37, 92, function()
@@ -2172,19 +2376,77 @@ local function TracksArea(parent, x, y)
     end)
     playSide:SetScript("OnLeave", function() GameTooltip:Hide() end)
     ns.playSideButton = playSide
+
+    -- While tracks move separately: this track's own Vertical, alignment and
+    -- Gap between icons, moved here from All tracks.
+    local own = CreateFrame("Frame", nil, inset)
+    own:SetPoint("TOPLEFT", inset, "TOPLEFT", 0, -64)
+    own:SetSize(INSET_W, 76)
+    ns.trackOwnBox = own
+    local ownVertical = CheckButton(own, "Vertical")
+    ownVertical:SetPoint("TOPLEFT", 6, 0)
+    ownVertical:SetScript("OnClick", function(self)
+        EditTrack().vertical = self:GetChecked() and true or false
+        UpdateBar()
+        LayoutBar()
+        RefreshOptions()
+    end)
+    ns.trackVerticalCheck = ownVertical
+    local function OwnAlignText(t)
+        local names = ALIGN_NAMES[RowVertical(t) and "v" or "h"]
+        local name = names[RowAlign(t)] or names.start
+        return (RowVertical(t) and "Column: " or "Row: ") .. name .. (name == "centered" and "" or " aligned")
+    end
+    local ownAlign = PanelButton(own, "", 96, 0, 176, function(_, mouse)
+        local t = EditTrack()
+        local i = 1
+        for n, a in ipairs(ALIGNS) do if a == RowAlign(t) then i = n end end
+        i = (i - 1 + (mouse == "RightButton" and -1 or 1)) % #ALIGNS + 1
+        t.align = ALIGNS[i]
+        UpdateBar()
+        LayoutBar()
+        RefreshOptions()
+    end)
+    ownAlign:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    ownAlign:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("This track's alignment", 1, 1, 1)
+        GameTooltip:AddLine("The side this track's row stays lined up on: left, centered or right; top, centered or bottom when it is vertical.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Left-click for the next, right-click for the previous.", 0.6, 0.6, 0.6, true)
+        GameTooltip:Show()
+    end)
+    ownAlign:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    ns.trackAlignButton = ownAlign
+    local ownGap = TrackSlider(own, "Gap between icons", "ForagerTrackIconGap", 0, 20, 0, -32, " px",
+        function() return RowIconGap(EditTrack()) end,
+        function(v)
+            EditTrack().iconGap = v
+            LayoutBar()
+            UpdateBar()
+        end)
+    ns.trackGapSlider = ownGap
+
+    -- Then whether it runs, a hint, and its trackers, all moving down while
+    -- the track's own settings show.
     local state = inset:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    state:SetPoint("TOPLEFT", 10, -70)
+    state:SetPoint("TOPLEFT", own, "BOTTOMLEFT", 10, -6)
     local use = PanelButton(inset, "Use this track", INSET_W - 134, -64, 122, function()
         local i = IndexOfTrack(EditTrack())
         if i and i ~= db.track then UseTrack(i) end
         RefreshOptions()
     end)
+    use:ClearAllPoints()
+    use:SetPoint("TOPLEFT", own, "BOTTOMLEFT", INSET_W - 132, 0)
     local hint = inset:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("TOPLEFT", 10, -92)
+    hint:SetPoint("TOPLEFT", own, "BOTTOMLEFT", 10, -28)
     hint:SetWidth(INSET_W - 20)
     hint:SetJustifyH("LEFT")
     hint:SetText("Tick a tracker to put it in this track, and type seconds beside it to keep it up longer or shorter than the rest. Drag a tracker, or a tab, to change the order.")
-    TrackerList(inset, 8, -134)
+    local listBox = CreateFrame("Frame", nil, inset)
+    listBox:SetPoint("TOPLEFT", own, "BOTTOMLEFT", 0, -70)
+    listBox:SetSize(INSET_W, 26)
+    ns.trackListBox = listBox
+    TrackerList(listBox, 8, 0)
 
     optionRefreshers[#optionRefreshers + 1] = function()
         local t = EditTrack()
@@ -2219,6 +2481,12 @@ local function TracksArea(parent, x, y)
         playSide:SetText(PlaySideText(t))
         if not armedAt then del:SetText("Delete") end
         del:SetEnabled(many)
+        -- The track's own settings, while tracks move separately.
+        local apart = RowsApart()
+        own:SetShown(apart)
+        own:SetHeight(apart and 76 or 1)
+        ownVertical:SetChecked(RowVertical(t))
+        ownAlign:SetText(OwnAlignText(t))
         local current = t == db.tracks[db.track]
         if current then
             state:SetText(db.enabled and "|cff7fd96aRunning|r" or "The current track, paused")
@@ -2226,6 +2494,7 @@ local function TracksArea(parent, x, y)
             state:SetText("|cff9d9d9dNot running|r")
         end
         use:SetShown(not current)
+        inset:SetHeight(64 + (apart and 76 or 1) + 70 + math.max(#Scan().list, 1) * 26 + 10)
     end
 end
 
@@ -2514,44 +2783,41 @@ local function BuildContent()
     LookSection(c, LEFT, -366)
 
     Header(c, "All tracks", LEFT, -490)
-    AllTracksSection(c, LEFT, -516)
-
-    Header(c, "Tracks and trackers", LEFT, -710)
-    TracksArea(c, LEFT, -736)
+    local allBox = AllTracksSection(c, LEFT, -516)
+    TracksArea(c, LEFT, allBox)
 
     -- Right column: the icons, the minimap button, then status.
     Header(c, "Tracker icons", RIGHT, -4)
     OptionCheck(c, "Show the tracker icons", "bar", RIGHT, -30, Refresh)
     OptionCheck(c, "Lock them in place", "barLocked", RIGHT, -56, Refresh)
-    OptionCheck(c, "Stack them vertically", "barVertical", RIGHT, -82, function() LayoutBar() UpdateBar() RefreshOptions() end)
-    OptionCheck(c, "Show the seconds to the next switch", "barCountdown", RIGHT, -108, Refresh)
-    OptionCheck(c, "Swipe down to the next switch", "barSwipe", RIGHT, -134, Refresh)
-    OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -160, Refresh)
-    OptionCheck(c, "Sparkles on the active tracker", "sparkles", RIGHT, -186, function() Refresh() RefreshOptions() end)
-    EffectButton(c, RIGHT + 212, -186)
-    SparkleSliders(c, RIGHT, -218)
-    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -306, "%", 5, function() LayoutBar() end)
-    PanelButton(c, "Reset position", RIGHT, -352, 130, ResetBarPosition)
-    ShapeButton(c, RIGHT + 138, -352)
+    OptionCheck(c, "Show the seconds to the next switch", "barCountdown", RIGHT, -82, Refresh)
+    OptionCheck(c, "Swipe down to the next switch", "barSwipe", RIGHT, -108, Refresh)
+    OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -134, Refresh)
+    OptionCheck(c, "Sparkles on the active tracker", "sparkles", RIGHT, -160, function() Refresh() RefreshOptions() end)
+    EffectButton(c, RIGHT + 212, -160)
+    SparkleSliders(c, RIGHT, -192)
+    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -280, "%", 5, function() LayoutBar() end)
+    PanelButton(c, "Reset position", RIGHT, -326, 130, ResetBarPosition)
+    ShapeButton(c, RIGHT + 138, -326)
 
-    Header(c, "Minimap", RIGHT, -390)
-    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -416, function()
+    Header(c, "Minimap", RIGHT, -364)
+    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -390, function()
         UpdateMinimapButton()
         if not db.minimap then Print("minimap button hidden. /forager opens the options.") end
     end)
-    OptionCheck(c, "Show the current tracker on it", "minimapShowsTracker", RIGHT, -442, function() UpdateMinimapButton() end)
+    OptionCheck(c, "Show the current tracker on it", "minimapShowsTracker", RIGHT, -416, function() UpdateMinimapButton() end)
 
-    Header(c, "Swap for the situation", RIGHT, -480)
-    OptionCheck(c, "Fishing pole equipped: Find Fish", "swapFishing", RIGHT, -506)
-    OptionCheck(c, "Cat Form: Track Humanoids", "swapCatForm", RIGHT, -532)
-    OptionCheck(c, "Hunter in a battleground: Track Humanoids", "swapHunterPvP", RIGHT, -558)
+    Header(c, "Swap for the situation", RIGHT, -454)
+    OptionCheck(c, "Fishing pole equipped: Find Fish", "swapFishing", RIGHT, -480)
+    OptionCheck(c, "Cat Form: Track Humanoids", "swapCatForm", RIGHT, -506)
+    OptionCheck(c, "Hunter in a battleground: Track Humanoids", "swapHunterPvP", RIGHT, -532)
 
-    Header(c, "Keys", RIGHT, -596)
-    KeyCapture(c, RIGHT, -622)
+    Header(c, "Keys", RIGHT, -570)
+    KeyCapture(c, RIGHT, -596)
 
-    Header(c, "Status", RIGHT, -680)
+    Header(c, "Status", RIGHT, -654)
     local status = c:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    status:SetPoint("TOPLEFT", RIGHT + 4, -708)
+    status:SetPoint("TOPLEFT", RIGHT + 4, -682)
     status:SetWidth(COL - 20)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)
@@ -2964,12 +3230,11 @@ SlashCmdList.FORAGER = function(msg)
         RefreshOptions()
         UpdateBar()
     elseif cmd == "rows" then
-        if arg == "apart" or arg == "unlock" then db.tracksApart = true
-        elseif arg == "together" or arg == "join" then db.tracksApart = false
-        else db.tracksApart = not db.tracksApart end
-        UpdateBar()
-        LayoutBar()
-        RefreshOptions()
+        local on
+        if arg == "apart" or arg == "unlock" then on = true
+        elseif arg == "together" or arg == "join" then on = false
+        else on = not db.tracksApart end
+        SetSeparate(on)
         Print(db.tracksApart and "each track's row moves on its own." or "the tracks' rows move together.")
     elseif cmd == "align" then
         if arg == "left" or arg == "top" then SetTrackAlign("start")

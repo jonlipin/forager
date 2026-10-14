@@ -178,6 +178,7 @@ function Frame:SetPoint(...)
 end
 function Frame:SetSize(w, h) self._w, self._h = w, h end
 function Frame:GetHeight() return rawget(self, "_h") or 0 end
+function Frame:SetHeight(h) self._h = h end
 function Frame:GetScript(n) return self.scripts[n] end
 T.strings = {}
 function Frame:CreateFontString() local fs = setmetatable({ scripts = {}, events = {} }, Frame) T.strings[#T.strings + 1] = fs return fs end
@@ -1719,20 +1720,19 @@ if (!EUI_ON) {
     check(look and trackers and holder, "found the pieces")
     check(y(look) > y(NS.styleButton) and y(NS.styleButton) - 22 > y(note), "header, then the style button, then the note")
     check(y(note) - 26 >= y(holder), "two lines of note fit above the slider")
-    check(y(holder) - rawget(holder, "_h") > y(trackers), "the slider ends above the tracker list header")
-    -- The tracker rows live in the tracks' inset, below its name, switches and hint.
-    local inset = NS.trackInset
-    local insetY = rawget(inset, "_point")[5]
-    local lowest, rows = 0, 0
+    check(y(holder) - rawget(holder, "_h") > y(T.string("All tracks")), "the slider ends above the All tracks header")
+    -- The tracker rows live in the list under the tracks' tabs, and the
+    -- sections hang from each other: All tracks, Tracks and trackers, the box.
+    local rows = 0
     for _, f in ipairs(T.frames) do
       local p = rawget(f, "_point")
-      if p and rawget(f, "parent") == inset and p[2] == 8 and type(p[3]) == "number" and p[3] <= -134 then
-        rows = rows + 1
-        lowest = math.min(lowest, insetY + p[3] - 24)
-      end
+      if p and rawget(f, "parent") == NS.trackListBox and p[2] == 8 then rows = rows + 1 end
     end
     check(rows == 12, "twelve tracker rows, got " .. rows)
-    check(lowest >= -rawget(content, "_h"), "the last row fits in the options (" .. lowest .. " of " .. tostring(rawget(content, "_h")) .. ")")
+    local allP, topP, insetP = rawget(NS.allTracksBox, "_point"), rawget(NS.tracksTop, "_point"), rawget(NS.trackInset, "_point")
+    local bottom = allP[#allP] - rawget(NS.allTracksBox, "_h") + topP[#topP] + insetP[#insetP] - rawget(NS.trackInset, "_h")
+    check(rawget(NS.trackInset, "_h") >= 64 + 70 + 12 * 26, "the box holds every row: " .. tostring(rawget(NS.trackInset, "_h")))
+    check(bottom >= -rawget(content, "_h"), "the last row fits in the options (" .. bottom .. " of " .. tostring(rawget(content, "_h")) .. ")")
   `);
 } else {
   run('EllesmereUI: the window frame and the tracker icons are skinned, the options are not', OPEN + `
@@ -2466,15 +2466,21 @@ run('the status button shows only when the timer was refused', OPEN + FIND + PRI
   check(rawget(retry, "shown") == false, "then hides")
 `);
 run('All tracks has its own section above Tracks and trackers, with Show all tracks together first', OPEN + `
-  local function y(f) local p = rawget(f, "_point") return p and p[#p] end
   local all, tracks = T.string("All tracks"), T.string("Tracks and trackers")
-  local show = T.string("Show all tracks together")
-  check(all and tracks and show, "the section, the edit area and the renamed checkbox are there")
-  check(T.string("Show every track's icons at once") == nil, "the old name is gone")
-  local box
-  for _, f in ipairs(T.frames) do if rawget(f, "label") == show then box = f end end
-  check(y(all) > y(box) and y(box) > y(tracks), "All tracks, then its first setting, then Tracks and trackers")
-  check(y(NS.trackInset) < y(tracks), "the edit box sits under Tracks and trackers")
+  local show, sep = T.string("Show all tracks together"), T.string("Move Tracks Separately")
+  check(all and tracks and show and sep, "the sections and the renamed checkboxes are there")
+  check(T.string("Show every track's icons at once") == nil and T.string("Move each track's row on its own") == nil, "the old names are gone")
+  local function owner(label) for _, f in ipairs(T.frames) do if rawget(f, "label") == label then return f end end end
+  local showCb, sepCb = owner(show), owner(sep)
+  local p1, p2 = rawget(showCb, "_point"), rawget(sepCb, "_point")
+  check(rawget(showCb, "parent") == NS.allTracksBox and p1[#p1] == 0 and p2[#p2] == 0, "both on the top line of All tracks")
+  check(p2[#p2 - 1] > p1[#p1 - 1], "Move Tracks Separately to the right of it")
+  local v, a = NS.verticalCheck, NS.alignButton
+  local pv, pa = rawget(v, "_point"), rawget(a, "_point")
+  check(rawget(v, "parent") == NS.allTracksBox and pv[#pv] == pa[#pa] and pv[#pv - 1] < pa[#pa - 1], "Vertical on the left of the alignment, on one line")
+  local tp = rawget(NS.tracksTop, "_point")
+  check(tp[2] == NS.allTracksBox and tp[3] == "BOTTOMLEFT", "Tracks and trackers sits under All tracks")
+  check(rawget(NS.trackInset, "_point")[2] == NS.tracksTop, "and the edit box under its header")
 `);
 run('each track puts its play button on the right or the left of its icons', OPEN + `
   ForagerDB.rotation[1494] = true
@@ -2532,6 +2538,53 @@ run('with one row on show, switching tracks keeps the icons on their aligned sid
   check(rawget(ForagerBar, "_point")[5] == ty, "switching tracks keeps the top still")
   SlashCmdList.FORAGER("align bottom") T.advance(0.3)
   check(rawget(ForagerBar, "_point")[1] == "BOTTOM", "bottom aligned: held by the bottom")
+`);
+run('settings that need every track on show are grayed out without it', OPEN + `
+  ForagerDB.showAllTracks = false
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(NS.separateCheck, "enabled") == false, "Move Tracks Separately grayed out")
+  check(rawget(NS.gapTracksSlider, "enabled") == false, "Gap between tracks grayed out")
+  check(rawget(NS.verticalCheck, "enabled") ~= false and rawget(NS.alignButton, "enabled") ~= false, "Vertical and the alignment still work with one row")
+  ForagerDB.showAllTracks = true
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(NS.separateCheck, "enabled") == true and rawget(NS.gapTracksSlider, "enabled") == true, "back on with every track on show")
+`);
+run('Move Tracks Separately moves Vertical, alignment and icon gap into each track, and back', OPEN + `
+  ForagerDB.rotation[1494] = true
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[1494] = true ForagerDB.rotation[5225] = true
+  SlashCmdList.FORAGER("track 1")
+  T.advance(0.5)
+  local sep = NS.separateCheck
+  sep.checked = true sep.scripts.OnClick(sep)
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(ForagerDB.tracksApart == true, "on")
+  check(ForagerDB.tracks[2].vertical == false and ForagerDB.tracks[2].align == "start" and ForagerDB.tracks[2].iconGap == 6, "each track starts from the shared settings")
+  check(rawget(NS.verticalCheck, "shown") == false and rawget(NS.alignButton, "shown") == false and rawget(NS.gapIconsHolder, "shown") == false,
+    "gone from All tracks")
+  check(rawget(NS.allTracksBox, "_h") == 76, "and All tracks closes up")
+  check(rawget(NS.trackOwnBox, "shown") == true, "shown in the track's tab instead")
+  ForagerTrackTab2.scripts.OnClick(ForagerTrackTab2)
+  local v = NS.trackVerticalCheck
+  v.checked = true v.scripts.OnClick(v)
+  check(ForagerDB.tracks[2].vertical == true and ForagerDB.tracks[1].vertical == false, "Hunting alone goes vertical")
+  NS.trackGapSlider.scripts.OnValueChanged(NS.trackGapSlider, 10)
+  check(ForagerDB.tracks[2].iconGap == 10 and ForagerDB.tracks[1].iconGap == 6, "and gets its own icon gap")
+  NS.trackAlignButton.scripts.OnClick(NS.trackAlignButton, "LeftButton")
+  check(ForagerDB.tracks[2].align == "center", "and its own alignment")
+  T.advance(0.5)
+  local p2 = rawget(ForagerSlot2Button2, "_point")
+  check(p2[1] == "TOP" and p2[#p2] == -(36 + 10), "Hunting's icons go down its column, 10 px apart")
+  local p1 = rawget(ForagerTrackButton2, "_point")
+  check(p1[1] == "LEFT" and p1[#p1 - 1] == 36 + 6, "track 1's stay in a row, 6 px apart")
+  sep.checked = false sep.scripts.OnClick(sep)
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(NS.verticalCheck, "shown") ~= false and rawget(NS.gapIconsHolder, "shown") ~= false, "back in All tracks when unticked")
+  check(rawget(NS.trackOwnBox, "shown") == false, "and out of the tab")
+  T.advance(0.5)
+  p2 = rawget(ForagerSlot2Button2, "_point")
+  check(p2[1] == "LEFT", "Hunting follows the shared settings again")
+  check(ForagerDB.tracks[2].vertical == true, "its own settings kept for next time")
 `);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);
