@@ -365,8 +365,15 @@ do
     -- Opening to the category: the page goes in before the window shows.
     OpenToCategory = function() T.page:SetParent(SettingsPanel) T.page:Show() SettingsPanel:Show() end,
   }
+  -- The controls, when they sit (inside the scroll frame) on the page and show.
   function T.hosted()
-    for _, f in ipairs(T.frames) do if rawget(f, "parent") == T.page and f:IsVisible() then return f end end
+    local c = NS.content
+    if not c or not c:IsVisible() then return nil end
+    local p = rawget(c, "parent")
+    while p do
+      if p == T.page then return c end
+      p = rawget(p, "parent")
+    end
   end
 end
 `;
@@ -2189,5 +2196,18 @@ run('rows moved on their own keep their place; locking and reset still work', TW
   SlashCmdList.FORAGER("reset")
   check(ForagerDB.tracks[2].pos == nil, "reset clears it")
 `);
+run('the options page fills its width and scrolls instead of shrinking', `
+  SettingsPanel:Show()
+  T.page.GetWidth = function() return 700 end
+  T.page.GetHeight = function() return 560 end
+  ForagerOptionsScroll.GetWidth = function() return 668 end
+  T.page:SetParent(SettingsPanel) T.page:Show()
+  check(T.hosted() ~= nil, "controls on the page")
+  local scale = rawget(NS.content, "scale")
+  check(scale and math.abs(scale - (668 - 4) / 680) < 1e-9, "scaled to the width only: " .. tostring(scale))
+  check(scale > 0.9, "not shrunk to the page's height")
+  check(rawget(NS.content, "parent") ~= T.page and rawget(rawget(NS.content, "parent"), "parent") == ForagerOptionsScroll,
+    "inside the scroll frame")
+`, { page: true });
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

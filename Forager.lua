@@ -2014,6 +2014,7 @@ local function EnsureContent()
         return nil
     end
     content = made
+    ns.content = made
     return content
 end
 
@@ -2127,13 +2128,35 @@ local function RegisterOptionsPage()
     local title = page:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", 16, -16)
     title:SetText("Forager")
+    -- The options fill the page's width and scroll when they are taller than
+    -- it. (Shrunk to fit the height, the tracks sections of 1.10 to 1.12 left
+    -- them at half size in a corner of the page.)
+    -- UIPanelScrollFrameTemplate works from Lua; the newer ScrollFrameTemplate wants its
+    -- settings as XML key values when it is made (Aura Ledger's XML gives it them).
+    local scroll, template = TryCreate("ScrollFrame", "ForagerOptionsScroll", page,
+        { "UIPanelScrollFrameTemplate" })
+    scroll:SetPoint("TOPLEFT", page, "TOPLEFT", 6, -42)
+    scroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -26, 6)
+    local child = CreateFrame("Frame", nil, scroll)
+    child:SetSize(W, CONTENT_H)
+    scroll:SetScrollChild(child)
+    if template == "bare" then
+        -- No template: the mouse wheel scrolls it.
+        scroll:EnableMouseWheel(true)
+        scroll:SetScript("OnMouseWheel", function(self, delta)
+            local range = self:GetVerticalScrollRange() or 0
+            local at = math.max(0, math.min(range, (self:GetVerticalScroll() or 0) - delta * 40))
+            self:SetVerticalScroll(at)
+        end)
+    end
     local function Fill(self)
         if not EnsureContent() then return end
         if window and window:IsShown() then window:Hide() end
-        local w, h = self:GetWidth() or 0, self:GetHeight() or 0
+        local w = scroll:GetWidth() or 0
         local scale = 1
-        if w > 0 and h > 0 then scale = math.min(1, (w - 12) / W, (h - 50) / CONTENT_H) end
-        Host(self, 6, -42, scale)
+        if w > 0 then scale = math.min(1, (w - 4) / W) end
+        child:SetSize(W * scale, CONTENT_H * scale)
+        Host(child, 0, 0, scale)
     end
     page:SetScript("OnShow", Fill)
     -- The page's size can arrive after OnShow: fit again then, and bring the controls here if

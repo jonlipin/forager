@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.12.1 - 2026-10-14
+
+- Fixed: the options page in Esc > Options > AddOns > Forager had shrunk to about half size in a corner of the page. It was being scaled down to fit the page's height, and the new track settings had made it much taller. It now fills the page's width at full size and scrolls when it is taller than the page.
+
 ## 1.12.0 - 2026-10-14
 
 - Line up the tracks' rows on the left, in the center or on the right. With the icons stacked vertically, the columns line up at the top, in the center or at the bottom. Use the alignment button under Tracks and trackers: left-click for the next, right-click for the previous.
