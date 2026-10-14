@@ -1412,6 +1412,13 @@ local function OptionSlider(parent, label, key, minV, maxV, x, y, unit, step, af
     value:SetPoint("TOPRIGHT", 0, -1)
 
     local slider = TryCreate("Slider", name, holder, { "MinimalSliderTemplate", "UISliderTemplate", "OptionsSliderTemplate" })
+    -- The mouse wheel scrolls the options page instead of stopping on the slider.
+    slider:EnableMouseWheel(true)
+    slider:SetScript("OnMouseWheel", function(_, delta)
+        local sc = ns.optionsScroll
+        local handler = sc and sc:GetScript("OnMouseWheel")
+        if handler then handler(sc, delta) end
+    end)
     for _, suffix in ipairs({ "Low", "High", "Text" }) do
         local extra = _G[name .. suffix]
         if extra then extra:SetText("") extra:Hide() end
@@ -2131,24 +2138,41 @@ local function RegisterOptionsPage()
     -- The options fill the page's width and scroll when they are taller than
     -- it. (Shrunk to fit the height, the tracks sections of 1.10 to 1.12 left
     -- them at half size in a corner of the page.)
-    -- UIPanelScrollFrameTemplate works from Lua; the newer ScrollFrameTemplate wants its
-    -- settings as XML key values when it is made (Aura Ledger's XML gives it them).
-    local scroll, template = TryCreate("ScrollFrame", "ForagerOptionsScroll", page,
-        { "UIPanelScrollFrameTemplate" })
+    -- Built the way Shard Grid's page is, which scrolls well on this client: the
+    -- modern ScrollFrameTemplate (the minimal scroll bar art draws here; the old
+    -- template's arrow buttons use Interface\\Buttons art, which does not), the bar's
+    -- range set by hand and the bar hidden when nothing needs scrolling, and the
+    -- mouse wheel always scrolling the page.
+    local scroll, template
+    for _, tmpl in ipairs({ "ScrollFrameTemplate", "UIPanelScrollFrameTemplate" }) do
+        local ok, made = pcall(CreateFrame, "ScrollFrame", "ForagerOptionsScroll", page, tmpl)
+        if ok and made then scroll, template = made, tmpl break end
+    end
+    if not scroll then scroll = CreateFrame("ScrollFrame", "ForagerOptionsScroll", page) end
+    ns.report["options scroll"] = template or "plain (mouse wheel only)"
     scroll:SetPoint("TOPLEFT", page, "TOPLEFT", 6, -42)
-    scroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -26, 6)
+    scroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -22, 4)
     local child = CreateFrame("Frame", nil, scroll)
     child:SetSize(W, CONTENT_H)
     scroll:SetScrollChild(child)
-    if template == "bare" then
-        -- No template: the mouse wheel scrolls it.
-        scroll:EnableMouseWheel(true)
-        scroll:SetScript("OnMouseWheel", function(self, delta)
-            local range = self:GetVerticalScrollRange() or 0
-            local at = math.max(0, math.min(range, (self:GetVerticalScroll() or 0) - delta * 40))
-            self:SetVerticalScroll(at)
-        end)
+    local bar = scroll.ScrollBar or scroll.scrollBar or _G["ForagerOptionsScrollScrollBar"]
+    if type(bar) ~= "table" then bar = nil end
+    local function Range()
+        return math.max(0, (child:GetHeight() or 0) - (scroll:GetHeight() or 0))
     end
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function(self, delta)
+        self:SetVerticalScroll(math.max(0, math.min(Range(), (self:GetVerticalScroll() or 0) - delta * 40)))
+    end)
+    local function UpdateScroll()
+        local range = Range()
+        if bar then
+            if bar.SetMinMaxValues then pcall(bar.SetMinMaxValues, bar, 0, range) end
+            bar:SetShown(range > 1)
+        end
+        if (scroll:GetVerticalScroll() or 0) > range then scroll:SetVerticalScroll(range) end
+    end
+    ns.optionsScroll = scroll
     local function Fill(self)
         if not EnsureContent() then return end
         if window and window:IsShown() then window:Hide() end
@@ -2157,6 +2181,7 @@ local function RegisterOptionsPage()
         if w > 0 then scale = math.min(1, (w - 4) / W) end
         child:SetSize(W * scale, CONTENT_H * scale)
         Host(child, 0, 0, scale)
+        UpdateScroll()
     end
     page:SetScript("OnShow", Fill)
     -- The page's size can arrive after OnShow: fit again then, and bring the controls here if

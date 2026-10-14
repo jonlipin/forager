@@ -176,6 +176,8 @@ function Frame:SetPoint(...)
   points[(...)] = { ... }
 end
 function Frame:SetSize(w, h) self._w, self._h = w, h end
+function Frame:GetHeight() return rawget(self, "_h") or 0 end
+function Frame:GetScript(n) return self.scripts[n] end
 T.strings = {}
 function Frame:CreateFontString() local fs = setmetatable({ scripts = {}, events = {} }, Frame) T.strings[#T.strings + 1] = fs return fs end
 function T.string(text) for _, fs in ipairs(T.strings) do if rawget(fs, "text") == text then return fs end end end
@@ -2208,6 +2210,24 @@ run('the options page fills its width and scrolls instead of shrinking', `
   check(scale > 0.9, "not shrunk to the page's height")
   check(rawget(NS.content, "parent") ~= T.page and rawget(rawget(NS.content, "parent"), "parent") == ForagerOptionsScroll,
     "inside the scroll frame")
+`, { page: true });
+run('the options page scrolls with the wheel, over sliders too, and hides its bar when it fits', `
+  SettingsPanel:Show()
+  ForagerOptionsScroll.GetWidth = function() return 668 end
+  ForagerOptionsScroll.GetHeight = function() return 500 end
+  T.page:SetParent(SettingsPanel) T.page:Show()
+  local sc = ForagerOptionsScroll
+  local at = 0
+  sc.GetVerticalScroll = function() return at end
+  sc.SetVerticalScroll = function(_, v) at = v end
+  sc.scripts.OnMouseWheel(sc, -1)
+  check(at == 40, "wheel down scrolls 40: " .. at)
+  local slider = ForagerOptionsSliderdelay
+  check(slider ~= nil and slider.scripts.OnMouseWheel ~= nil, "the delay slider takes the wheel")
+  slider.scripts.OnMouseWheel(slider, -1)
+  check(at == 80, "over a slider the page still scrolls: " .. at)
+  for i = 1, 100 do sc.scripts.OnMouseWheel(sc, 1) end
+  check(at == 0, "stops at the top")
 `, { page: true });
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

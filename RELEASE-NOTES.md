@@ -1,3 +1,3 @@
-## 1.12.1 - 2026-10-14
+## 1.12.2 - 2026-10-14
 
-- Fixed: the options page in Esc > Options > AddOns > Forager had shrunk to about half size in a corner of the page. It was being scaled down to fit the page's height, and the new track settings had made it much taller. It now fills the page's width at full size and scrolls when it is taller than the page.
+- The options page scrolls the way Shard Grid's does: the game's thin modern scroll bar (the older one's arrow buttons don't draw on this client), hidden when everything fits, and the mouse wheel scrolls the page anywhere on it, sliders included, instead of stopping on them.
