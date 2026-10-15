@@ -1549,7 +1549,7 @@ if (!EUI_ON) {
     UIParent.GetHeight = function() return 768 end
   ` + OPEN + `
     local scale = rawget(ForagerOptions, "scale")
-    check(scale and math.abs(scale - (768 - 40) / (1240 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
+    check(scale and math.abs(scale - (768 - 40) / (1266 + 70)) < 1e-9, "scaled to fit: " .. tostring(scale))
   `);
   run('drawn sparkles follow the size and intensity', SPARK_HELPERS + `
     T.fire("PLAYER_ENTERING_WORLD")
@@ -2629,6 +2629,206 @@ run('Shift-click (or the key set in the options) jumps to a tracker and pauses t
   herbs.scripts.OnClick(herbs, "LeftButton")
   IsControlKeyDown = function() return false end
   check(ForagerDB.enabled == true, "off: no click pauses")
+`);
+run('Track and pause: the held tracker glows reddish orange until the rotation runs again', TRACKBTN + `
+  ForagerDB.rotation[1494] = true
+  T.advance(6.5) check(T.active() == "Find Herbs", "rotating")
+  local herbs, beasts = T.trackButton("Find Herbs"), T.trackButton("Track Beasts")
+  local function tint(b) local v = rawget(b.glow, "vertex") or {} return v[1], v[2], v[3], v[4] end
+  local function orange(b)
+    local r, g, bl, a = tint(b)
+    return r == 1 and g ~= nil and math.abs(g - 0.36) < 1e-6 and bl ~= nil and math.abs(bl - 0.12) < 1e-6 and a == 1
+  end
+  local function plain(b) local r, g, bl, a = tint(b) return r == 1 and g == 1 and bl == 1 and a == 1 end
+  local function shiftClick(b)
+    IsShiftKeyDown = function() return true end
+    b.scripts.OnClick(b, "LeftButton")
+    IsShiftKeyDown = function() return false end
+  end
+  check(plain(herbs), "herbs glows in its own color")
+  shiftClick(beasts)
+  T.advance(1)
+  check(T.active() == "Track Beasts" and ForagerDB.enabled == false and ForagerDB.pinned == true, "beasts held, the rotation paused")
+  check(rawget(beasts, "lit") == true and orange(beasts), "beasts glows reddish orange: " .. table.concat({ tint(beasts) }, ", "))
+  -- Shift-click another while one is held: the hold moves to it.
+  shiftClick(herbs)
+  T.advance(1)
+  check(T.active() == "Find Herbs" and orange(herbs), "herbs held now, reddish orange")
+  -- Play: back to the normal glow.
+  ForagerPauseButton.scripts.OnClick(ForagerPauseButton, "LeftButton")
+  T.advance(0.5)
+  check(ForagerDB.enabled == true and ForagerDB.pinned == nil, "running again, nothing held")
+  check(plain(herbs), "herbs back to its own glow: " .. table.concat({ tint(herbs) }, ", "))
+  -- A plain pause holds nothing: the glow keeps its own color.
+  ForagerPauseButton.scripts.OnClick(ForagerPauseButton, "LeftButton")
+  T.advance(0.5)
+  check(ForagerDB.enabled == false and ForagerDB.pinned == nil and plain(herbs), "paused with the button: the normal glow")
+  -- Held, then resumed some other way: normal again.
+  shiftClick(beasts)
+  T.advance(1)
+  check(orange(beasts), "held again")
+  SlashCmdList.FORAGER("on")
+  T.advance(0.5)
+  check(ForagerDB.pinned == nil and plain(beasts), "resumed with /forager on: the normal glow")
+`);
+run('Track and pause tints the round glow too', TRACKBTN + `
+  SlashCmdList.FORAGER("shape round")
+  ForagerDB.rotation[1494] = true
+  T.advance(6.5)
+  local beasts = T.trackButton("Track Beasts")
+  IsShiftKeyDown = function() return true end
+  beasts.scripts.OnClick(beasts, "LeftButton")
+  IsShiftKeyDown = function() return false end
+  T.advance(1)
+  local round = beasts.fgCircle.glow
+  local v = rawget(round, "vertex") or {}
+  check(rawget(round, "shown") == true and v[1] == 1 and v[2] ~= nil and math.abs(v[2] - 0.36) < 1e-6 and v[4] == 1, "the round glow reddish orange")
+  SlashCmdList.FORAGER("on")
+  T.advance(0.5)
+  v = rawget(round, "vertex") or {}
+  check(v[2] == 1 and v[3] == 1 and v[4] == 1, "and back to its own color")
+`, { atlas: true });
+run('Hide this track: off the screen, skipped by Next track, and one always stays', OPEN + PRINTED + `
+  SlashCmdList.FORAGER("track new Hunting")
+  ForagerDB.rotation[1494] = true
+  SlashCmdList.FORAGER("track new Fishing")
+  ForagerDB.rotation[43308] = true
+  SlashCmdList.FORAGER("track 1")
+  T.advance(0.5)
+  ForagerOptions.scripts.OnShow(ForagerOptions)
+  check(rawget(ForagerRow3, "shown") ~= false and rawget(ForagerSlot2Button1, "key") == 1494, "three rows")
+  local hide = NS.hideCheck
+  ForagerTrackTab2.scripts.OnClick(ForagerTrackTab2)
+  hide.checked = true hide.scripts.OnClick(hide)
+  check(ForagerDB.tracks[2].hidden == true and ForagerDB.track == 1, "Hunting hidden, track 1 still current")
+  T.advance(0.5)
+  check(rawget(ForagerRow3, "shown") == false and rawget(ForagerSlot2Button1, "key") == 43308, "two rows: Hunting's is gone, Fishing moved up")
+  local text = rawget(ForagerTrackTab2, "text")
+  check(text:find("Hunting", 1, true) and text ~= "Hunting" and rawget(ForagerTrackTab2, "shown") ~= false, "its tab stays, grayed: " .. text)
+  SlashCmdList.FORAGER("track next")
+  check(ForagerDB.track == 3, "Next track skips it: " .. tostring(ForagerDB.track))
+  SlashCmdList.FORAGER("track 2")
+  check(ForagerDB.track == 3 and T.printed("is hidden"), "asked for by number: refused")
+  -- Hiding the running track moves on to the next one on show, still running.
+  ForagerTrackTab3.scripts.OnClick(ForagerTrackTab3)
+  hide.checked = true hide.scripts.OnClick(hide)
+  check(ForagerDB.tracks[3].hidden == true and ForagerDB.track == 1 and ForagerDB.enabled == true, "Fishing hidden, on to track 1: " .. tostring(ForagerDB.track))
+  -- The last one on show stays.
+  ForagerTrackTab1.scripts.OnClick(ForagerTrackTab1)
+  hide.checked = true hide.scripts.OnClick(hide)
+  check(not ForagerDB.tracks[1].hidden and rawget(hide, "checked") == false and T.printed("always stays on show"), "one track always stays on show")
+  SlashCmdList.FORAGER("track next")
+  check(ForagerDB.track == 1 and T.printed("other tracks are hidden"), "nothing to go on to")
+  -- Shown again.
+  ForagerTrackTab2.scripts.OnClick(ForagerTrackTab2)
+  hide.checked = false hide.scripts.OnClick(hide)
+  T.advance(0.5)
+  check(ForagerDB.tracks[2].hidden == nil and rawget(ForagerSlot2Button1, "key") == 1494, "Hunting back on screen")
+  check(rawget(ForagerTrackTab2, "text") == "Hunting", "its tab back to normal")
+  -- Deleting the current track while the next one is hidden: the next one on show takes over.
+  SlashCmdList.FORAGER("track 2")
+  ForagerTrackTab2.scripts.OnClick(ForagerTrackTab2)
+  local del
+  for _, f in ipairs(T.frames) do if rawget(f, "text") == "Delete" and rawget(f, "parent") == NS.trackInset then del = f end end
+  del.scripts.OnClick(del) del.scripts.OnClick(del)
+  check(#ForagerDB.tracks == 2 and ForagerDB.track == 1 and not ForagerDB.tracks[1].hidden and ForagerDB.tracks[2].hidden == true,
+    "Hunting deleted: track 1 runs, Fishing stays hidden")
+`);
+run('Collapse till hovered folds the row into its play button, which shows the tracker that is on', OPEN + `
+  ForagerDB.rotation[1494] = true
+  T.advance(6.5) check(T.active() == "Find Herbs", "herbs on")
+  local p = ForagerPauseButton
+  local b1, b3 = ForagerTrackButton1, ForagerTrackButton3
+  local function x(f) local pt = rawget(f, "_point") return pt and pt[4] end
+  check(x(p) == 3 * 42 and x(b1) == 0, "open: three icons, then the play button")
+  local cb = NS.collapseCheck
+  cb.checked = true cb.scripts.OnClick(cb)
+  check(ForagerDB.tracks[1].collapse == true, "set for the track")
+  T.frame(0.1)
+  local mid = x(b1)
+  check(mid > 0 and mid < 3 * 42 and rawget(b1, "alpha") > 0 and rawget(b1, "alpha") < 1, "part way: the icons slide toward the button, fading: " .. tostring(mid))
+  T.frame(0.5)
+  check(rawget(b1, "shown") == false and rawget(b3, "shown") == false and x(p) == 3 * 42, "folded: only the play button, where it was")
+  check(rawget(p.icon, "texture") == 1 and rawget(p.stop, "shown") == false, "it shows Find Herbs, without the stop art")
+  check(rawget(p, "lit") == true, "glowing as the tracker that is on")
+  check(rawget(p.cd, "shown") == true and rawget(p.cd, "cdStart") ~= nil, "with the swipe to the next switch")
+  check(rawget(p.mini, "shown") == true and rawget(p.mini, "texture") == 2 and rawget(p.mini, "_w") == 9, "Find Minerals a quarter size in the corner: " .. tostring(rawget(p.mini, "_w")))
+  local mp = rawget(p.mini, "_point")
+  check(mp[1] == "BOTTOMRIGHT" and mp[3] == "BOTTOMRIGHT", "lower right")
+  -- Minerals' turn: it grows out of the corner to fill the button.
+  for _ = 1, 40 do T.advance(0.25) if T.active() == "Find Minerals" then break end end
+  check(T.active() == "Find Minerals", "switched")
+  local gw = rawget(p.grow, "_w")
+  check(rawget(p.grow, "shown") == true and rawget(p.grow, "texture") == 2 and gw > 9 and gw < 36, "minerals growing from the corner: " .. tostring(gw))
+  check(rawget(p.grow, "_point")[1] == "BOTTOMRIGHT", "from the lower right")
+  check(rawget(p.icon, "texture") == 1 and rawget(p.cd, "shown") == false, "over herbs, still on the button, the swipe waiting")
+  T.frame(0.5)
+  check(rawget(p.grow, "shown") == false and rawget(p.icon, "texture") == 2, "the button now shows minerals")
+  check(rawget(p.mini, "texture") == 3 and rawget(p.mini, "_w") == 9, "and beasts grew into the corner")
+  check(rawget(p.cd, "shown") == true, "the swipe back")
+  -- Hover the button: the row opens.
+  p.IsMouseOver = function() return true end
+  T.frame(0.5)
+  check(rawget(b1, "shown") ~= false and x(b1) == 0 and rawget(b1, "alpha") == 1, "hovered: the row opens")
+  check(type(rawget(p.icon, "texture")) == "string" and rawget(p.stop, "shown") == true and rawget(p.mini, "shown") == false, "the button back to its stop art")
+  -- Along the row it stays open; off it, it folds again.
+  p.IsMouseOver = function() return false end
+  ForagerRow1.IsMouseOver = function() return true end
+  T.frame(0.5)
+  check(rawget(b1, "shown") ~= false, "still open over the row")
+  ForagerRow1.IsMouseOver = function() return false end
+  T.frame(0.5)
+  check(rawget(b1, "shown") == false, "folded again once the mouse leaves the row")
+  -- Unticked: it opens for good.
+  cb.checked = false cb.scripts.OnClick(cb)
+  T.frame(0.5)
+  check(rawget(b1, "shown") ~= false and x(b1) == 0, "unticked: open again")
+`);
+run('folded rows: another track folds to its play button; paused shows the play art; held glows reddish orange', TRACKBTN + TWO_ROWS + `
+  ForagerDB.tracks[1].collapse = true
+  ForagerDB.tracks[2].collapse = true
+  T.advance(1) check(T.active() == "Find Herbs", "herbs on: " .. tostring(T.active()))
+  local p1, p2 = ForagerPauseButton, ForagerSlot2Pause
+  check(rawget(ForagerTrackButton1, "shown") == false and rawget(ForagerSlot2Button1, "shown") == false, "both rows folded")
+  check(rawget(p1.icon, "texture") == 1 and rawget(p1, "lit") == true, "track 1's button shows herbs, glowing")
+  check(type(rawget(p2.icon, "texture")) == "string" and rawget(p2.play, "shown") == true and rawget(p2, "lit") ~= true, "Hunting's is just its play button")
+  check(rawget(p2.mini, "shown") ~= true and rawget(p2.cd, "shown") ~= true, "with nothing in its corner")
+  -- Sparkles go on the button standing in for the running row.
+  local onFace = false
+  for _, f in ipairs(T.frames) do
+    local pt = rawget(f, "_point")
+    if rawget(f, "kind") == "ModelScene" and rawget(f, "shown") and pt and pt[2] == p1.icon then onFace = true end
+  end
+  check(onFace, "sparkles on the folded button")
+  -- Paused: the play art over herbs, no swipe, and nothing next.
+  SlashCmdList.FORAGER("off")
+  T.advance(1)
+  check(rawget(p1.icon, "texture") == 1 and rawget(p1.play, "shown") == true and rawget(p1.cd, "shown") == false, "paused: play art, no swipe")
+  check(rawget(p1.mini, "shown") == false, "nothing next while paused")
+  -- Held with Shift-click: beasts grows in, and the button glows reddish orange.
+  local beasts = T.trackButton("Track Beasts")
+  IsShiftKeyDown = function() return true end
+  beasts.scripts.OnClick(beasts, "LeftButton")
+  IsShiftKeyDown = function() return false end
+  T.advance(1)
+  local v = rawget(p1.glow, "vertex") or {}
+  check(rawget(p1.icon, "texture") == 3 and v[2] ~= nil and math.abs(v[2] - 0.36) < 1e-6 and v[4] == 1, "beasts held: the button glows reddish orange")
+  SlashCmdList.FORAGER("on")
+  T.advance(0.5)
+  v = rawget(p1.glow, "vertex") or {}
+  check(v[2] == 1 and rawget(p1.stop, "shown") == false and rawget(p1.cd, "shown") == true, "running again: its own glow, the swipe back")
+`);
+run('the track tab: Hide this track and Collapse till hovered side by side under the name settings', OPEN + `
+  local function owner(text) for _, f in ipairs(T.frames) do local l = rawget(f, "label") if l and rawget(l, "text") == text then return f end end end
+  local hide, col = owner("Hide this track"), owner("Collapse till hovered")
+  check(hide ~= nil and hide == NS.hideCheck and col == NS.collapseCheck, "both there")
+  local ph, pc, ps = rawget(hide, "_point"), rawget(col, "_point"), rawget(NS.showNameCheck, "_point")
+  check(ph[#ph] == -62 and pc[#pc] == -62 and pc[#pc - 1] > ph[#ph - 1], "side by side on one line")
+  check(ps[#ps] > ph[#ph], "under Show its name above its icons")
+  local po = rawget(NS.trackOwnBox, "_point")
+  check(po[#po] == -90, "the track's own settings below them: " .. tostring(po[#po]))
+  check(rawget(NS.trackInset, "_h") == 90 + 1 + 70 + 5 * 26 + 10, "the box grew by their line: " .. tostring(rawget(NS.trackInset, "_h")))
+  check(rawget(hide, "enabled") == false and rawget(col, "enabled") ~= false, "with one track, Hide is grayed out; Collapse works")
 `);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);

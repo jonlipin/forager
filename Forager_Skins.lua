@@ -402,6 +402,24 @@ local function FromBar(button, shape)
     end
 end
 
+-- A glow's color at `alpha`: the art's own, or the button's tint (the
+-- reddish orange of a tracker held on by Track and pause).
+local function Tint(button, tex, alpha)
+    local tint = rawget(button, "fgTint")
+    if tint then tex:SetVertexColor(tint[1], tint[2], tint[3], alpha)
+    else tex:SetVertexColor(1, 1, 1, alpha) end
+end
+
+-- Tints a button's glows (nil: their own color) at once, at whatever alpha
+-- their fade has reached; a fade under way carries on in the new color.
+function ns.GlowTint(button, tint)
+    button.fgTint = tint
+    local parts = rawget(button, "fgCircle")
+    for _, tex in ipairs({ Field(button, "glow") or false, (parts and parts.glow) or false }) do
+        if tex then Tint(button, tex, levels[tex] or 0) end
+    end
+end
+
 -- The tracker that is on glows: the action bar's shimmer, or the round glow
 -- while the icon is a circle. Called when the tracker comes on or goes off
 -- (each glow fades in or out over FADE), and at once when the look changes.
@@ -415,7 +433,7 @@ function ns.GlowChanged(button, on, instant)
     local roundGlow = parts and parts.glow
     local round = roundGlow and IsCircle(rawget(button, "fgShape")) or false
     local function Mark(tex, anim, wanted)
-        local function Set(alpha) tex:SetVertexColor(1, 1, 1, alpha) end
+        local function Set(alpha) Tint(button, tex, alpha) end
         if wanted then
             tex:Show()
             if anim and not anim:IsPlaying() then anim:Play() end
@@ -828,6 +846,7 @@ function ns.UpdateSparkles(active)
     -- short life; pausing, hiding or switching them off stops them all.
     if not active then
         for _, button in ipairs(ns.trackButtons or {}) do StopSparks(button) end
+        for _, button in ipairs(ns.pauseButtons or {}) do StopSparks(button) end
         return
     end
     local list = rawget(active, "fgSparks") or MakeSparks(active)

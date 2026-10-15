@@ -36,13 +36,13 @@ local DEFAULTS = {
     minimapShowsTracker = true, -- the minimap button shows the tracker that is on
     swapFishing = true,    -- fishing pole equipped: Find Fish
     swapCatForm = true,    -- Cat Form: Track Humanoids
-    swapHunterPvP = true,
+    swapHunterPvP = true,  -- hunter in a battleground or arena: Track Humanoids
     showAllTracks = true,  -- a row of icons for every track, not just the current one
     trackAlign = "start",  -- rows line up on the left (columns at the top), "center" or "end"
     trackGap = 12,         -- space between the tracks' rows (or columns), in pixels
     tracksApart = false,   -- each track's row moves on its own, saved per track
     iconGap = 6,           -- space between the icons in a row, in pixels
-    pinModifier = "SHIFT", -- this key + click on an icon: switch to it and pause (SHIFT, CTRL, ALT or NONE)  -- hunter in a battleground or arena: Track Humanoids
+    pinModifier = "SHIFT", -- this key + click on an icon: switch to it and pause (SHIFT, CTRL, ALT or NONE)
     style = "auto",        -- window style: "auto", "blizzard" or "dark" (Styles.lua)
     darkAlpha = 0.92,      -- the Dark style's background opacity
     sparkles = true,       -- sparkles round the active tracker's border
@@ -54,6 +54,9 @@ local DEFAULTS = {
     -- lastTracked: { [player GUID] = key or false } for restoring after death
     -- order: { spellID, ... } the order you set; trackers missing from it
     --        follow in the tracking menu's order
+    -- pinned: true while Track and pause holds a tracker on, until the rotation runs again
+    -- tracks: { name, rotation, skipped, durations, hideName, playFirst, pos, vertical,
+    --           align, iconGap, hidden, collapse } per track
 }
 
 local db
@@ -485,13 +488,48 @@ local function UseTrack(i, quiet)
     if RefreshOptions then RefreshOptions() end
 end
 
+-- The next (or previous) track on show: hidden tracks are skipped.
 local function CycleTrack(dir)
     local n = #db.tracks
     if n < 2 then
         Print("there is only one track. Add another in the options.")
         return
     end
-    UseTrack((db.track - 1 + dir) % n + 1)
+    local i = db.track
+    for _ = 1, n - 1 do
+        i = (i - 1 + dir) % n + 1
+        if not db.tracks[i].hidden then
+            UseTrack(i)
+            return
+        end
+    end
+    Print("the other tracks are hidden. Show one in its tab in the options.")
+end
+
+-- Hide this track: off the screen and out of Next track until it is shown
+-- again. The last track on show can't be hidden. Hiding the current track
+-- moves on to the next one on show, which runs if this one was running.
+-- False when the track stays on show.
+local function SetTrackHidden(t, hidden)
+    if hidden then
+        local others = 0
+        for _, x in ipairs(db.tracks) do
+            if x ~= t and not x.hidden then others = others + 1 end
+        end
+        if others == 0 then
+            Print("one track always stays on show.")
+            return false
+        end
+        t.hidden = true
+        Log("track hidden: " .. t.name)
+        if t == db.tracks[db.track] then CycleTrack(1) end
+    else
+        t.hidden = nil
+        Log("track shown: " .. t.name)
+    end
+    if UpdateBar then UpdateBar() end
+    if RefreshOptions then RefreshOptions() end
+    return true
 end
 
 -- A new, empty track. From the command it becomes the current track; from
@@ -520,7 +558,15 @@ local function DeleteTrack(t)
     local current = db.tracks[db.track]
     table.remove(db.tracks, i)
     if t == current then
-        UseTrack(math.min(i, #db.tracks), true)
+        -- The next track on show takes over; the current track is always on show.
+        local n = #db.tracks
+        local pick = math.min(i, n)
+        for k = 0, n - 1 do
+            local j = (math.min(i, n) - 1 + k) % n + 1
+            if not db.tracks[j].hidden then pick = j break end
+        end
+        db.tracks[pick].hidden = nil
+        UseTrack(pick, true)
     else
         SelectTrack(IndexOfTrack(current))
         if UpdateBar then UpdateBar() end
@@ -608,79 +654,84 @@ local function KeepOn()
     end
 end
 
--- Trackers a situation calls for. Track Humanoids is a druid spell (Cat
--- Form) and a hunter spell; Find Fish came with the Weather-Beaten Journal.
-local TRACK_HUMANOIDS = { [5225] = true, [19883] = true }
-local FIND_FISH = { [43308] = true }
+-- Swap for the situation: the tracker a fishing pole, Cat Form or a
+-- battleground calls for goes on in place of the rotation (UpdateSituation).
+local UpdateSituation
+do
+    -- Trackers a situation calls for. Track Humanoids is a druid spell (Cat
+    -- Form) and a hunter spell; Find Fish came with the Weather-Beaten Journal.
+    local TRACK_HUMANOIDS = { [5225] = true, [19883] = true }
+    local FIND_FISH = { [43308] = true }
 
-local function FindEntry(s, ids, name)
-    for _, e in ipairs(s.list) do
-        if ids[e.key] or e.name == name then return e end
+    local function FindEntry(s, ids, name)
+        for _, e in ipairs(s.list) do
+            if ids[e.key] or e.name == name then return e end
+        end
     end
-end
 
-local function HoldingFishingPole()
-    local id = GetInventoryItemID and GetInventoryItemID("player", 16)
-    if not id or not (C_Item and C_Item.GetItemInfoInstant) then return false end
-    local _, _, _, _, _, classID, subClassID = C_Item.GetItemInfoInstant(id)
-    return classID == 2 and subClassID == 20
-end
-
-local function InCatForm()
-    local ok, form = pcall(GetShapeshiftFormID)
-    return ok and form == 1
-end
-
-local function HunterInBattleground()
-    local _, class = UnitClass("player")
-    if class ~= "HUNTER" then return false end
-    local inside, kind = IsInInstance()
-    return inside and (kind == "pvp" or kind == "arena")
-end
-
--- The tracker the moment calls for, and why, or nil.
-local function Situation(s)
-    if db.swapFishing and HoldingFishingPole() then
-        local e = FindEntry(s, FIND_FISH, "Find Fish")
-        if e then return e, "fishing pole equipped" end
+    local function HoldingFishingPole()
+        local id = GetInventoryItemID and GetInventoryItemID("player", 16)
+        if not id or not (C_Item and C_Item.GetItemInfoInstant) then return false end
+        local _, _, _, _, _, classID, subClassID = C_Item.GetItemInfoInstant(id)
+        return classID == 2 and subClassID == 20
     end
-    if db.swapCatForm and InCatForm() then
-        local e = FindEntry(s, TRACK_HUMANOIDS, "Track Humanoids")
-        if e then return e, "Cat Form" end
-    end
-    if db.swapHunterPvP and HunterInBattleground() then
-        local e = FindEntry(s, TRACK_HUMANOIDS, "Track Humanoids")
-        if e then return e, "battleground" end
-    end
-end
 
--- Puts on the tracker a situation calls for, and when it's over hands back
--- to the rotation, or to what was on before when the rotation is paused.
-local function UpdateSituation()
-    local s = Scan()
-    local e, why = Situation(s)
-    if e then
-        if not override or override.key ~= e.key then
-            override = { key = e.key, name = e.name, why = why, before = override and override.before or s.active }
-            Log("situation: " .. why .. ", using " .. e.name)
+    local function InCatForm()
+        local ok, form = pcall(GetShapeshiftFormID)
+        return ok and form == 1
+    end
+
+    local function HunterInBattleground()
+        local _, class = UnitClass("player")
+        if class ~= "HUNTER" then return false end
+        local inside, kind = IsInInstance()
+        return inside and (kind == "pvp" or kind == "arena")
+    end
+
+    -- The tracker the moment calls for, and why, or nil.
+    local function Situation(s)
+        if db.swapFishing and HoldingFishingPole() then
+            local e = FindEntry(s, FIND_FISH, "Find Fish")
+            if e then return e, "fishing pole equipped" end
+        end
+        if db.swapCatForm and InCatForm() then
+            local e = FindEntry(s, TRACK_HUMANOIDS, "Track Humanoids")
+            if e then return e, "Cat Form" end
+        end
+        if db.swapHunterPvP and HunterInBattleground() then
+            local e = FindEntry(s, TRACK_HUMANOIDS, "Track Humanoids")
+            if e then return e, "battleground" end
+        end
+    end
+
+    -- Puts on the tracker a situation calls for, and when it's over hands back
+    -- to the rotation, or to what was on before when the rotation is paused.
+    function UpdateSituation()
+        local s = Scan()
+        local e, why = Situation(s)
+        if e then
+            if not override or override.key ~= e.key then
+                override = { key = e.key, name = e.name, why = why, before = override and override.before or s.active }
+                Log("situation: " .. why .. ", using " .. e.name)
+                if UpdateBar then UpdateBar() end
+            end
+            if s.on[e.key] then return end
+            if InCombatLockdown() or UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") or UnitOnTaxi("player") then return end
+            if Busy() or OnCooldown(e.key) or (failing[e.key] or 0) > GetTime() then return end
+            if attempt and not attempt.done then return end
+            Cast(e, "situation")
+            ownedKey = e.key
+        elseif override then
+            local before = override.before
+            Log("situation over (" .. override.why .. ")")
+            override = nil
+            if db.enabled then
+                lastSwitch = 0 -- the rotation picks up at once
+            elseif before and before ~= s.active and s.byKey[before] then
+                Cast(s.byKey[before], "situation")
+            end
             if UpdateBar then UpdateBar() end
         end
-        if s.on[e.key] then return end
-        if InCombatLockdown() or UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") or UnitOnTaxi("player") then return end
-        if Busy() or OnCooldown(e.key) or (failing[e.key] or 0) > GetTime() then return end
-        if attempt and not attempt.done then return end
-        Cast(e, "situation")
-        ownedKey = e.key
-    elseif override then
-        local before = override.before
-        Log("situation over (" .. override.why .. ")")
-        override = nil
-        if db.enabled then
-            lastSwitch = 0 -- the rotation picks up at once
-        elseif before and before ~= s.active and s.byKey[before] then
-            Cast(s.byKey[before], "situation")
-        end
-        if UpdateBar then UpdateBar() end
     end
 end
 
@@ -967,6 +1018,77 @@ local function MakeGlow(button)
     return glow, anim
 end
 
+-- Lights a button's glow or puts it out. Held on by Track and pause, it
+-- glows reddish orange; otherwise in the art's own color.
+local SetGlow
+do
+    local PIN_GLOW = { 1, 0.36, 0.12 }
+
+    function SetGlow(b, on, held)
+        local tint = held and PIN_GLOW or false
+        if b.tint ~= tint then
+            b.tint = tint
+            if ns.GlowTint then
+                ns.GlowTint(b, tint or nil)
+            else
+                local c = tint or { 1, 1, 1 }
+                b.glow:SetVertexColor(c[1], c[2], c[3])
+            end
+        end
+        if on ~= b.lit then
+            b.lit = on
+            -- Forager_Skins.lua fades the glow in and out, and swaps in a round
+            -- one for round icons.
+            if ns.GlowChanged then
+                ns.GlowChanged(b, on)
+            else
+                b.glow:SetShown(on)
+                if on then b.anim:Play() else b.anim:Stop() end
+            end
+        end
+    end
+end
+
+-- The swipe that ticks down to the next switch, inside an icon's frame.
+-- Made from the game's CooldownFrameTemplate, whose own swipe is a plain
+-- color filling the whole frame (a bare Cooldown has none), so a look can
+-- go back to it. The template pins itself to every edge of its parent;
+-- its points are cleared before setting ours.
+local function MakeSweep(b)
+    local okCd, cd = pcall(CreateFrame, "Cooldown", nil, b, "CooldownFrameTemplate")
+    cd = okCd and cd or CreateFrame("Cooldown", nil, b)
+    cd:ClearAllPoints()
+    -- 2 px in at the top and left, 3 at the right and 2.5 at the bottom, fitted
+    -- in game: an even 2 px overhung the frame there, 4 left a gap.
+    cd:SetPoint("TOPLEFT", 2, -2)
+    cd:SetPoint("BOTTOMRIGHT", -3, 2.5)
+    -- The template's color swipe, darker, as the game's own action buttons use
+    -- it. (The Cooldown Manager's swipe art left the left side of the icon
+    -- unswept on this client.) A bare Cooldown, which has no color swipe, gets
+    -- that art instead, since it draws nothing without a texture.
+    if okCd then
+        pcall(cd.SetSwipeColor, cd, 0, 0, 0, 0.75)
+        cd.fgSweep = "color"
+    else
+        pcall(cd.SetSwipeTexture, cd, SWIPE_FILE, 0, 0, 0, 0.75)
+        cd.fgSweep = SWIPE_FILE
+    end
+    pcall(cd.SetDrawEdge, cd, false)
+    pcall(cd.SetDrawBling, cd, false)
+    pcall(cd.SetHideCountdownNumbers, cd, true)
+    cd:Hide()
+    return cd
+end
+
+-- Takes a button's swipe off. Not Cooldown:Clear(): the game marks it as
+-- protected.
+local function HideSweep(b)
+    if b.swipeStart then
+        b.swipeStart, b.swipeDuration = nil, nil
+        b.cd:Hide()
+    end
+end
+
 -- A click is a key press as far as the game is concerned, so this works even
 -- when the timer can't switch.
 local function SwitchTo(key, source)
@@ -1000,6 +1122,8 @@ end
 local function PinTracker(key)
     if not SwitchTo(key) then return end
     Log("pinned " .. tostring(key))
+    -- Held: its glow turns reddish orange until the rotation runs again.
+    db.pinned = true
     if db.enabled then
         db.enabled = false
         Print(NameOf(Scan(), key) .. " is on, and the rotation is paused. Press play to carry on.")
@@ -1113,22 +1237,69 @@ local function SaveRowPosition(slot)
     if spot then t.pos = spot end
 end
 
+---------------------------------------------------------------------------
+-- Collapse till hovered (each track's own setting): while the mouse is away,
+-- the track's row folds into its play / stop button, its icons sliding in
+-- under the button and fading out. Hovering the button opens the row again
+-- until the mouse leaves it.
+---------------------------------------------------------------------------
+
+local Fold = {
+    TIME = 0.3,      -- seconds to fold up or open all the way
+    GROW = 0.4,      -- seconds for the next tracker to grow into a folded button
+    MINI = 0.25,     -- the next tracker in the button's corner, a share of its size
+    INSET = 2,       -- pixels in from the button's lower right corner
+    TAKE_OVER = 0.7, -- how far grown the next tracker is when the button takes it on
+    -- [track] = { c = how far folded, 0 open to 1 folded; open = held open by the mouse }
+    states = setmetatable({}, { __mode = "k" }),
+}
+
+function Fold.Ease(x) return x * x * (3 - 2 * x) end
+
+-- A track's fold. A track already set to collapse starts out folded.
+function Fold.Of(t)
+    local f = Fold.states[t]
+    if not f then
+        f = { c = t.collapse and 1 or 0, open = not t.collapse }
+        Fold.states[t] = f
+    end
+    return f
+end
+
+-- How far a row is folded, eased: 0 open, 1 folded into its button.
+function Fold.Share(slot)
+    local t = slot.track and db.tracks[slot.track]
+    local f = t and Fold.states[t]
+    return f and Fold.Ease(f.c) or 0
+end
+
 -- A track's icons along its row, with its play / stop button after them, or
--- before them when the track puts it first.
+-- before them when the track puts it first. A row folding up slides its icons
+-- toward that button, fading them, and puts them away once they are in.
 local function PutRow(slot, n, vertical, igap)
+    slot.n, slot.vertical, slot.igap = n, vertical, igap
     local t = slot.track and db.tracks[slot.track]
     local first = t and t.playFirst
-    local function Put(b, i)
-        local offset = (i - 1) * (SIZE + igap)
+    local e = Fold.Share(slot)
+    local function At(i) return (i - 1) * (SIZE + igap) end
+    local function Put(b, offset)
         b:ClearAllPoints()
         if vertical then b:SetPoint("TOP", slot.row, "TOP", 0, -offset)
         else b:SetPoint("LEFT", slot.row, "LEFT", offset, 0) end
     end
+    local home = At(first and 1 or n + 1)
     for i, b in ipairs(slot.buttons) do
-        b:SetShown(i <= n)
-        if i <= n then Put(b, first and i + 1 or i) end
+        b:SetShown(i <= n and e < 0.999)
+        if i <= n then
+            local offset = At(first and i + 1 or i)
+            Put(b, offset + (home - offset) * e)
+            b:SetAlpha(1 - e)
+            b:EnableMouse(e < 0.5)
+        end
     end
-    Put(slot.pause, first and 1 or n + 1)
+    Put(slot.pause, home)
+    slot.label:SetAlpha(1 - e)
+    slot.label:EnableMouse(e < 0.5)
 end
 
 -- The track's name over its row, on its lined-up side.
@@ -1170,6 +1341,7 @@ local function LayoutBar()
                 PutRow(slot, n, vertical, igap)
                 PlaceLabel(slot, vertical, align)
                 slot.label:SetShown(Named(slot))
+                slot.named = Named(slot)
                 local lh = Named(slot) and 16 or 0
                 local want = HoldPointFor(vertical, align)
                 slot.row:ClearAllPoints()
@@ -1245,6 +1417,7 @@ local function LayoutBar()
             PutRow(slot, n, vertical, igap)
             PlaceLabel(slot, vertical, align)
             slot.label:SetShown(Named(slot))
+            slot.named = Named(slot)
         end
     end
     PlaceBar()
@@ -1356,33 +1529,8 @@ local function TrackButton(slot, i)
     b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     b.icon = DressIcon(b)
     b.glow, b.anim = MakeGlow(b)
-    -- The swipe that ticks down to the next switch, inside the icon's frame.
-    -- Made from the game's CooldownFrameTemplate, whose own swipe is a plain
-    -- color filling the whole frame (a bare Cooldown has none), so a look can
-    -- go back to it. The template pins itself to every edge of its parent;
-    -- its points are cleared before setting ours.
-    local okCd, cd = pcall(CreateFrame, "Cooldown", nil, b, "CooldownFrameTemplate")
-    b.cd = okCd and cd or CreateFrame("Cooldown", nil, b)
-    b.cd:ClearAllPoints()
-    -- 2 px in at the top and left, 3 at the right and 2.5 at the bottom, fitted
-    -- in game: an even 2 px overhung the frame there, 4 left a gap.
-    b.cd:SetPoint("TOPLEFT", 2, -2)
-    b.cd:SetPoint("BOTTOMRIGHT", -3, 2.5)
-    -- The template's color swipe, darker, as the game's own action buttons use
-    -- it. (The Cooldown Manager's swipe art left the left side of the icon
-    -- unswept on this client.) A bare Cooldown, which has no color swipe, gets
-    -- that art instead, since it draws nothing without a texture.
-    if okCd then
-        pcall(b.cd.SetSwipeColor, b.cd, 0, 0, 0, 0.75)
-        b.cd.fgSweep = "color"
-    else
-        pcall(b.cd.SetSwipeTexture, b.cd, SWIPE_FILE, 0, 0, 0, 0.75)
-        b.cd.fgSweep = SWIPE_FILE
-    end
-    pcall(b.cd.SetDrawEdge, b.cd, false)
-    pcall(b.cd.SetDrawBling, b.cd, false)
-    pcall(b.cd.SetHideCountdownNumbers, b.cd, true)
-    b.cd:Hide()
+    -- The swipe that ticks down to the next switch.
+    b.cd = MakeSweep(b)
     -- The seconds, on a layer above the swipe.
     b.textLayer = CreateFrame("Frame", nil, b)
     b.textLayer:SetAllPoints()
@@ -1405,6 +1553,9 @@ local function TrackButton(slot, i)
         local out = t.skipped[self.key] == true
         local lines = { NameOf(s, self.key) }
         if s.on[self.key] then lines[#lines + 1] = "|cff7fd96aOn now|r" end
+        if db.pinned and not db.enabled and self.key == s.active then
+            lines[#lines + 1] = "|cffff7a3aHeld on: press play to carry on|r"
+        end
         if out then lines[#lines + 1] = "|cff9d9d9dLeft out of the rotation|r" end
         if ManyRows() then lines[#lines + 1] = "Track: " .. t.name end
         if not s.on[self.key] then lines[#lines + 1] = "Left-click: track this now" end
@@ -1439,6 +1590,8 @@ end
 local function PauseButtonFor(slot)
     local j = slot.index
     local p = CreateFrame("Button", j == 1 and "ForagerPauseButton" or ("ForagerSlot" .. j .. "Pause"), slot.row)
+    -- Above the row's icons, which slide in under it when the row folds up.
+    p:SetFrameLevel(slot.row:GetFrameLevel() + 6)
     p:SetSize(SIZE, SIZE)
     p:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     p.icon = DressIcon(p)
@@ -1458,6 +1611,30 @@ local function PauseButtonFor(slot)
     -- Without the art, words say it instead.
     p.text = p:CreateFontString(nil, "OVERLAY", "GameFontNormalOutline")
     p.text:SetPoint("BOTTOM", 0, 3)
+    -- Folded (Collapse till hovered), it stands in for the row: the tracker
+    -- that is on, glowing, with the swipe and seconds to the next switch, and
+    -- the next tracker small in the lower right corner (Fold.Draw).
+    p.glow, p.anim = MakeGlow(p)
+    p.cd = MakeSweep(p)
+    p.top = CreateFrame("Frame", nil, p)
+    p.top:SetAllPoints()
+    p.top:SetFrameLevel(p.cd:GetFrameLevel() + 2)
+    p.count = p.top:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
+    p.count:SetPoint("CENTER")
+    -- The next tracker taking over, growing from the corner to fill the button.
+    p.grow = p.top:CreateTexture(nil, "ARTWORK", nil, 0)
+    p.grow:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    p.grow:Hide()
+    -- The one after it, in the corner on a thin dark edge.
+    p.mini = p.top:CreateTexture(nil, "ARTWORK", nil, 2)
+    p.mini:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    p.mini:SetPoint("BOTTOMRIGHT", p, "BOTTOMRIGHT", -Fold.INSET, Fold.INSET)
+    p.mini:Hide()
+    p.miniEdge = p.top:CreateTexture(nil, "ARTWORK", nil, 1)
+    p.miniEdge:SetColorTexture(0, 0, 0, 0.85)
+    p.miniEdge:SetPoint("TOPLEFT", p.mini, "TOPLEFT", -1, 1)
+    p.miniEdge:SetPoint("BOTTOMRIGHT", p.mini, "BOTTOMRIGHT", 1, -1)
+    p.miniEdge:Hide()
     p:SetScript("OnClick", function(_, button)
         if button == "RightButton" then SlashCmdList.FORAGER("") else RunSlot(slot) end
     end)
@@ -1485,6 +1662,176 @@ local function PauseButtonFor(slot)
     end
     if ns.SkinPauseButton then ns.SkinPauseButton(p) end
     return p
+end
+
+do
+    -- A texture's file, set only when it changes (a folding row's button is
+    -- drawn every frame while it moves).
+    local function SetTexture(tex, file)
+        if tex.fgFile ~= file then
+            tex.fgFile = file
+            tex:SetTexture(file)
+        end
+    end
+
+    -- The play / stop button's face. slot.want (from UpdateBar) says what it
+    -- shows: key and tex, the tracker that is on (nil unless its track is the
+    -- current one); nextKey and nextTex, the one that comes next; running; swipe,
+    -- start and dur, the swipe to the next switch, and count, its seconds; tint,
+    -- true while Track and pause holds the tracker on.
+    --
+    -- With its row open (or folded less than halfway) it has its own face: the
+    -- Forager icon with the stop art, or the play art while its track isn't
+    -- running. Folded, it shows the tracker that is on, glowing as its icon does,
+    -- with the swipe and seconds and the next tracker small in its lower right
+    -- corner. When the next one's turn comes, it grows from the corner to fill
+    -- the button, and the one after it grows into the corner from nothing. dt
+    -- moves those along; slot.moving is true while one is still moving.
+    function Fold.Draw(slot, dt)
+        local p, w = slot.pause, slot.want
+        if not w then return end
+        if not (w.key and Fold.Share(slot) >= 0.5) then
+            slot.faceKey, slot.grow, slot.miniKey, slot.mini, slot.moving = nil, nil, nil, 0, false
+            SetTexture(p.icon, ICON)
+            p.icon:SetDesaturated(not w.running)
+            p.stop:SetShown(w.running and p.stopArt ~= nil)
+            p.play:SetShown(not w.running and p.playArt ~= nil)
+            local art = w.running and p.stopArt or p.playArt
+            p.text:SetText(art and "" or (w.running and "Pause" or "Go"))
+            p.grow:Hide()
+            p.mini:Hide()
+            p.miniEdge:Hide()
+            p.count:SetText("")
+            HideSweep(p)
+            SetGlow(p, false)
+            return
+        end
+        local moving = false
+        -- The tracker that is on. A new one grows over the old one, and the
+        -- button takes it on once it nearly fills it.
+        if not slot.faceKey then
+            slot.faceKey = w.key
+            SetTexture(p.icon, w.tex)
+        elseif slot.faceKey ~= w.key and not (slot.grow and slot.grow.key == w.key) then
+            slot.grow = { t = 0, key = w.key, tex = w.tex }
+            p.grow:SetTexture(w.tex)
+            slot.mini = 0
+        end
+        local g, early = slot.grow, false
+        if g then
+            g.t = g.t + dt
+            local q = math.min(1, g.t / Fold.GROW)
+            local k = Fold.Ease(q)
+            local size = SIZE * (Fold.MINI + (1 - Fold.MINI) * k)
+            local inset = Fold.INSET * (1 - k)
+            p.grow:ClearAllPoints()
+            p.grow:SetPoint("BOTTOMRIGHT", p, "BOTTOMRIGHT", -inset, inset)
+            p.grow:SetSize(size, size)
+            if q >= Fold.TAKE_OVER then
+                -- The button takes it on underneath, and it fades into the button.
+                slot.faceKey = g.key
+                SetTexture(p.icon, g.tex)
+                p.grow:SetAlpha((1 - q) / (1 - Fold.TAKE_OVER))
+            else
+                p.grow:SetAlpha(1)
+                early = true
+            end
+            if q >= 1 then
+                slot.grow = nil
+                p.grow:Hide()
+            else
+                p.grow:Show()
+                moving = true
+            end
+        else
+            p.grow:Hide()
+        end
+        -- The one after it, in the corner: it grows in from nothing when it
+        -- changes, and shrinks away while nothing comes next (paused, waiting).
+        if w.nextKey and w.nextKey ~= slot.miniKey then
+            if slot.miniKey then slot.mini = 0 end
+            slot.miniKey = w.nextKey
+            p.mini:SetTexture(w.nextTex)
+        end
+        local target, m = w.nextKey and 1 or 0, slot.mini or 0
+        if m ~= target then
+            m = m < target and math.min(target, m + dt / Fold.GROW) or math.max(target, m - dt / Fold.GROW)
+            slot.mini = m
+            if m ~= target then moving = true end
+        end
+        local ms = SIZE * Fold.MINI * Fold.Ease(m)
+        if ms >= 1 then
+            p.mini:SetSize(ms, ms)
+            p.mini:Show()
+            p.miniEdge:Show()
+        else
+            p.mini:Hide()
+            p.miniEdge:Hide()
+        end
+        -- No stop art over the tracker. Paused, the play art, as on its own face.
+        p.icon:SetDesaturated(false)
+        p.stop:Hide()
+        p.play:SetShown(not w.running and p.playArt ~= nil)
+        p.text:SetText((not w.running and not p.playArt) and "Go" or "")
+        -- The swipe and the seconds, once the new tracker is in.
+        if w.swipe and not early then
+            if p.swipeStart ~= w.start or p.swipeDuration ~= w.dur then
+                p.swipeStart, p.swipeDuration = w.start, w.dur
+                pcall(p.cd.SetCooldown, p.cd, w.start, w.dur)
+            end
+            p.cd:Show()
+        else
+            HideSweep(p)
+        end
+        p.count:SetText(early and "" or w.count)
+        SetGlow(p, true, w.tint)
+        slot.moving = moving
+    end
+
+    -- Whether the mouse keeps a folding row open. Folded, the button that is
+    -- left opens it; open, it stays open until the mouse leaves the row (its
+    -- name, and a few pixels round it, included).
+    local function Hovered(slot, f)
+        if slot.pause:IsMouseOver() then return true end
+        if not f.open then return false end
+        if slot.row:IsMouseOver(4, -4, -4, 4) then return true end
+        return (slot.named and slot.label:IsMouseOver(2, -2, -2, 2)) and true or false
+    end
+
+    -- Moves every row on show along by dt seconds: folding up or opening as the
+    -- mouse comes and goes, and its button's animations. True while there is
+    -- anything to watch or move.
+    local function Step(dt)
+        local busy = false
+        for j, slot in ipairs(slots) do
+            local t = barViews[j] and slot.track and db.tracks[slot.track]
+            if t then
+                local f = Fold.Of(t)
+                if t.collapse then
+                    f.open = Hovered(slot, f)
+                    busy = true
+                else
+                    f.open = true
+                end
+                local target, moved = f.open and 0 or 1, false
+                if f.c ~= target then
+                    f.c = f.c < target and math.min(target, f.c + dt / Fold.TIME) or math.max(target, f.c - dt / Fold.TIME)
+                    if slot.n then PutRow(slot, slot.n, slot.vertical, slot.igap) end
+                    moved, busy = true, true
+                end
+                if moved or slot.moving then Fold.Draw(slot, dt) end
+                if slot.moving then busy = true end
+            end
+        end
+        return busy
+    end
+
+    -- Runs the folds every frame, only while one needs it.
+    Fold.driver = CreateFrame("Frame")
+    Fold.driver:Hide()
+    Fold.driver:SetScript("OnUpdate", function(self, dt)
+        if not (db and bar and Step(dt)) then self:Hide() end
+    end)
 end
 
 -- A row's name: with every track on show, a click makes that track the
@@ -1544,28 +1891,40 @@ end
 
 UpdateBar = function()
     if not db then return end
+    -- Track and pause holds a tracker on until the rotation runs again, by
+    -- any way: play, the pause key, the minimap button or the options.
+    if db.enabled and db.pinned then db.pinned = nil end
     local s = Scan()
     local show = db.bar and #s.list > 0
     if db.barHideCombat and (InCombatLockdown() or UnitAffectingCombat("player")) then show = false end
     if not show then
         if bar then bar:Hide() end
+        Fold.driver:Hide()
         if ns.UpdateSparkles then ns.UpdateSparkles(nil) end
         return
     end
     if not bar then BuildBar() end
     bar:Show()
 
-    -- Which tracks get a row: every one, or just the current one.
+    -- Which tracks get a row: every one on show (Hide this track takes one
+    -- off the screen), or just the current one.
     local list = {}
     if ManyRows() then
-        for i = 1, #db.tracks do list[i] = i end
+        for i = 1, #db.tracks do
+            if not db.tracks[i].hidden then list[#list + 1] = i end
+        end
     else
         list[1] = db.track
     end
     local views, shape = {}, {}
     for j, ti in ipairs(list) do
         local slot = Slot(j)
-        slot.track = ti
+        if slot.track ~= ti then
+            -- Another track in this row now: its button starts afresh.
+            slot.track = ti
+            slot.faceKey, slot.grow, slot.miniKey, slot.mini, slot.moving = nil, nil, nil, 0, false
+        end
+        Fold.Of(db.tracks[ti])
         local entries = TrackEntries(s, db.tracks[ti])
         for i, e in ipairs(entries) do
             local b = TrackButton(slot, i)
@@ -1597,8 +1956,13 @@ UpdateBar = function()
     local left = math.ceil(delay - (GetTime() - lastSwitch))
     -- Nothing counts down while a switch is still landing.
     local landing = attempt and not attempt.done and not s.on[attempt.target]
-    local nextEntry = (db.enabled and left > 0 and not landing and not Blocker(s)) and NextEntry(s)
-    local sparkleButton
+    local blocked = Blocker(s)
+    local nextEntry = (db.enabled and left > 0 and not landing and not blocked) and NextEntry(s)
+    -- What comes next, for a folded row's corner: it stays through the switch.
+    local upcoming = (db.enabled and not blocked) and NextEntry(s) or nil
+    -- Held on by Track and pause: the tracker that is on glows reddish orange.
+    local held = (db.pinned and not db.enabled) and true or false
+    local sparkleButton, watch = nil, false
     for j, ti in ipairs(list) do
         local slot = slots[j]
         local t = db.tracks[ti]
@@ -1621,17 +1985,9 @@ UpdateBar = function()
                 b.icon:SetDesaturated(out)
                 b.icon:SetAlpha(out and 0.45 or 1)
             end
-            if on ~= b.lit then
-                b.lit = on
-                -- Forager_Skins.lua fades the glow in and out, and swaps in a round
-                -- one for round icons.
-                if ns.GlowChanged then
-                    ns.GlowChanged(b, on)
-                else
-                    b.glow:SetShown(on)
-                    if on then b.anim:Play() else b.anim:Stop() end
-                end
-            end
+            -- Held on by Track and pause, it glows reddish orange until the
+            -- rotation runs again.
+            SetGlow(b, on, on and held and b.key == s.active)
             -- Seconds to the next switch, and a swipe ticking down, on the icon
             -- that comes next, in the current track's row.
             local isNext = current and nextEntry and nextEntry.key == b.key
@@ -1642,10 +1998,8 @@ UpdateBar = function()
                     pcall(b.cd.SetCooldown, b.cd, lastSwitch, delay)
                 end
                 b.cd:Show()
-            elseif b.swipeStart then
-                -- Not Cooldown:Clear(): the game marks it as protected.
-                b.swipeStart, b.swipeDuration = nil, nil
-                b.cd:Hide()
+            else
+                HideSweep(b)
             end
             if on and b.key == s.active then sparkleButton = b end
         end
@@ -1664,17 +2018,29 @@ UpdateBar = function()
             end
         end
 
-        -- Running: stop art pauses it. Otherwise play art runs it.
-        local p = slot.pause
-        local running = current and db.enabled
-        p.icon:SetDesaturated(not running)
-        p.stop:SetShown(running and p.stopArt ~= nil)
-        p.play:SetShown(not running and p.playArt ~= nil)
-        local art = running and p.stopArt or p.playArt
-        p.text:SetText(art and "" or (running and "Pause" or "Go"))
+        -- The play / stop button: stop art pauses its track, play art runs it.
+        -- Folded (Collapse till hovered), it stands in for the whole row.
+        local onEntry = current and s.active and s.byKey[s.active] or nil
+        local w = slot.want or {}
+        slot.want = w
+        w.running = (current and db.enabled) and true or false
+        w.key = onEntry and onEntry.key or nil
+        w.tex = onEntry and (onEntry.texture or ICON) or nil
+        w.nextKey = (current and upcoming) and upcoming.key or nil
+        w.nextTex = (current and upcoming) and (upcoming.texture or ICON) or nil
+        w.swipe = (current and db.barSwipe and nextEntry) and true or false
+        w.start, w.dur = lastSwitch, delay
+        w.count = (current and db.barCountdown and nextEntry) and tostring(left) or ""
+        w.tint = held
+        Fold.Draw(slot, 0)
+        if w.key and Fold.Share(slot) >= 0.5 then sparkleButton = slot.pause end
+        local f = Fold.states[t]
+        if t.collapse or (f and f.c > 0) or slot.moving then watch = true end
     end
+    if watch then Fold.driver:Show() end
 
-    -- Sparkles on the tracker that is on, while running and the option is on.
+    -- Sparkles on the tracker that is on (on the button standing in for its
+    -- row while the row is folded), while running and the option is on.
     if ns.UpdateSparkles then
         ns.UpdateSparkles((db.sparkles and db.enabled) and sparkleButton or nil)
     end
@@ -1687,7 +2053,7 @@ end
 local optionRefreshers = {}
 local content, window, settingsPage, settingsCategory
 local nativeOpenFailed = false
-local W, CONTENT_H = 680, 1240
+local W, CONTENT_H = 680, 1266
 local COL = 320          -- column width
 local LEFT, RIGHT = 12, 352
 
@@ -1917,61 +2283,64 @@ end
 --   vertical  rows sort by height, tabs from left to right
 --   line      the marker, shown while dragging
 --   onDrop(from, to)
-local dragDriver = CreateFrame("Frame")
+local Sortable
+do
+    local dragDriver = CreateFrame("Frame")
 
--- Where the dragged item lands among the others, from the pointer.
-local function DropSlot(items, dragged, vertical)
-    local cx, cy = GetCursorPosition()
-    local slot, others = 1, {}
-    for _, f in ipairs(items) do
-        if f ~= dragged then
-            others[#others + 1] = f
-            local scale = (f.GetEffectiveScale and f:GetEffectiveScale()) or 1
-            local x, y = f:GetCenter()
-            if x and y and cx and cy then
-                if vertical then
-                    if y > cy / scale then slot = slot + 1 end
-                elseif x < cx / scale then
-                    slot = slot + 1
+    -- Where the dragged item lands among the others, from the pointer.
+    local function DropSlot(items, dragged, vertical)
+        local cx, cy = GetCursorPosition()
+        local slot, others = 1, {}
+        for _, f in ipairs(items) do
+            if f ~= dragged then
+                others[#others + 1] = f
+                local scale = (f.GetEffectiveScale and f:GetEffectiveScale()) or 1
+                local x, y = f:GetCenter()
+                if x and y and cx and cy then
+                    if vertical then
+                        if y > cy / scale then slot = slot + 1 end
+                    elseif x < cx / scale then
+                        slot = slot + 1
+                    end
                 end
             end
         end
+        return slot, others
     end
-    return slot, others
-end
 
-local function Sortable(handle, items, vertical, line, onDrop)
-    local from
-    handle:RegisterForDrag("LeftButton")
-    handle:SetScript("OnDragStart", function(self)
-        from = nil
-        for i, f in ipairs(items()) do
-            if f == self then from = i end
-        end
-        if not from then return end
-        dragDriver:SetScript("OnUpdate", function()
-            local slot, others = DropSlot(items(), self, vertical)
-            local at = others[slot]
-            line:ClearAllPoints()
-            if vertical then
-                if at then line:SetPoint("BOTTOMLEFT", at, "TOPLEFT", 0, 1)
-                else line:SetPoint("TOPLEFT", others[#others] or self, "BOTTOMLEFT", 0, -1) end
-            else
-                if at then line:SetPoint("TOPRIGHT", at, "TOPLEFT", -1, 0)
-                else line:SetPoint("TOPLEFT", others[#others] or self, "TOPRIGHT", 1, 0) end
+    function Sortable(handle, items, vertical, line, onDrop)
+        local from
+        handle:RegisterForDrag("LeftButton")
+        handle:SetScript("OnDragStart", function(self)
+            from = nil
+            for i, f in ipairs(items()) do
+                if f == self then from = i end
             end
-            line:Show()
+            if not from then return end
+            dragDriver:SetScript("OnUpdate", function()
+                local slot, others = DropSlot(items(), self, vertical)
+                local at = others[slot]
+                line:ClearAllPoints()
+                if vertical then
+                    if at then line:SetPoint("BOTTOMLEFT", at, "TOPLEFT", 0, 1)
+                    else line:SetPoint("TOPLEFT", others[#others] or self, "BOTTOMLEFT", 0, -1) end
+                else
+                    if at then line:SetPoint("TOPRIGHT", at, "TOPLEFT", -1, 0)
+                    else line:SetPoint("TOPLEFT", others[#others] or self, "TOPRIGHT", 1, 0) end
+                end
+                line:Show()
+            end)
         end)
-    end)
-    handle:SetScript("OnDragStop", function(self)
-        dragDriver:SetScript("OnUpdate", nil)
-        line:Hide()
-        if not from then return end
-        local was = from
-        from = nil
-        local slot = DropSlot(items(), self, vertical)
-        if slot ~= was then onDrop(was, slot) end
-    end)
+        handle:SetScript("OnDragStop", function(self)
+            dragDriver:SetScript("OnUpdate", nil)
+            line:Hide()
+            if not from then return end
+            local was = from
+            from = nil
+            local slot = DropSlot(items(), self, vertical)
+            if slot ~= was then onDrop(was, slot) end
+        end)
+    end
 end
 
 local INSET_W = COL - 4
@@ -2341,6 +2710,7 @@ local function TracksArea(parent, x, above)
             if self.index == db.track then
                 GameTooltip:AddLine(db.enabled and "Running" or "The current track, paused", 0.5, 0.85, 0.42)
             end
+            if t.hidden then GameTooltip:AddLine("Hidden: off the screen, skipped by Next track", 0.6, 0.6, 0.6) end
             GameTooltip:AddLine("Click to show its trackers. Drag it sideways to change the order of the tracks.", 0.8, 0.8, 0.8, true)
             GameTooltip:Show()
         end)
@@ -2350,7 +2720,8 @@ local function TracksArea(parent, x, above)
         return tab
     end
 
-    -- Inside: the track's name, Delete, its name on screen and play button side.
+    -- Inside: the track's name, Delete, its name on screen and play button
+    -- side, then Hide this track and Collapse till hovered.
     local nameLabel = inset:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     nameLabel:SetPoint("TOPLEFT", 10, -14)
     nameLabel:SetText("Name")
@@ -2412,11 +2783,42 @@ local function TracksArea(parent, x, above)
     end)
     playSide:SetScript("OnLeave", function() GameTooltip:Hide() end)
     ns.playSideButton = playSide
+    -- Hide this track: off the screen and out of Next track for now.
+    local hide = CheckButton(inset, "Hide this track")
+    hide:SetPoint("TOPLEFT", 6, -62)
+    hide:SetScript("OnClick", function(self)
+        if not SetTrackHidden(EditTrack(), self:GetChecked() and true or false) then self:SetChecked(false) end
+    end)
+    hide:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Hide this track", 1, 1, 1)
+        GameTooltip:AddLine("Takes this track off the screen and out of Next track for now, without deleting it. Untick it to bring it back. One track always stays on show.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    hide:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    ns.hideCheck = hide
+    -- Collapse till hovered: the row folds into its play / stop button.
+    local collapse = CheckButton(inset, "Collapse till hovered")
+    collapse:SetPoint("TOPLEFT", 150, -62)
+    collapse:SetScript("OnClick", function(self)
+        EditTrack().collapse = self:GetChecked() and true or nil
+        UpdateBar()
+        RefreshOptions()
+    end)
+    collapse:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Collapse till hovered", 1, 1, 1)
+        GameTooltip:AddLine("While the mouse is away, this track's row folds into its play / stop button. The button then shows the tracker that is on, with the swipe to the next switch and the next tracker small in its lower right corner, which grows to fill the button when its turn comes.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Hover the button to open the row. It folds again when the mouse leaves the row.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    collapse:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    ns.collapseCheck = collapse
 
     -- While tracks move separately: this track's own Vertical, alignment and
     -- Gap between icons, moved here from All tracks.
     local own = CreateFrame("Frame", nil, inset)
-    own:SetPoint("TOPLEFT", inset, "TOPLEFT", 0, -64)
+    own:SetPoint("TOPLEFT", inset, "TOPLEFT", 0, -90)
     own:SetSize(INSET_W, 76)
     ns.trackOwnBox = own
     local ownVertical = CheckButton(own, "Vertical")
@@ -2496,7 +2898,9 @@ local function TracksArea(parent, x, above)
             if many and i <= n then
                 local tab = Tab(i)
                 tab.index = i
-                tab:SetText(db.tracks[i].name)
+                -- A hidden track keeps its tab, its name grayed.
+                local name = db.tracks[i].name
+                tab:SetText(db.tracks[i].hidden and ("|cff808080" .. name .. "|r") or name)
                 if PanelTemplates_TabResize and not tab.isBare then
                     pcall(PanelTemplates_TabResize, tab, 0, w)
                 else
@@ -2514,6 +2918,9 @@ local function TracksArea(parent, x, above)
         if not (box.HasFocus and box:HasFocus()) then box:SetText(t.name) end
         showName:SetChecked(not t.hideName)
         showName:SetEnabled(many)
+        hide:SetChecked(t.hidden and true or false)
+        GrayCheck(hide, many)
+        collapse:SetChecked(t.collapse and true or false)
         playSide:SetText(PlaySideText(t))
         if not armedAt then del:SetText("Delete") end
         del:SetEnabled(many)
@@ -2526,137 +2933,143 @@ local function TracksArea(parent, x, above)
         local current = t == db.tracks[db.track]
         if current then
             state:SetText(db.enabled and "|cff7fd96aRunning|r" or "The current track, paused")
+        elseif t.hidden then
+            state:SetText("|cff9d9d9dHidden: off the screen, skipped by Next track|r")
         else
             state:SetText("|cff9d9d9dNot running|r")
         end
-        use:SetShown(not current)
-        inset:SetHeight(64 + (apart and 76 or 1) + 70 + math.max(#Scan().list, 1) * 26 + 10)
+        use:SetShown(not current and not t.hidden)
+        inset:SetHeight(90 + (apart and 76 or 1) + 70 + math.max(#Scan().list, 1) * 26 + 10)
     end
 end
 
--- Binding names for a key the pause key would take over.
-local function KeyText(key)
-    return (GetBindingText and GetBindingText(key)) or key
-end
-
-local function ActionText(action)
-    return _G["BINDING_NAME_" .. action] or action
-end
-
-local function PauseKeys()
-    return GetBindingKey("FORAGER_TOGGLE")
-end
-
-local MODIFIER_KEYS = {
-    LSHIFT = true, RSHIFT = true, LCTRL = true, RCTRL = true, LALT = true, RALT = true,
-    LMETA = true, RMETA = true, UNKNOWN = true,
-}
-
--- A button that binds the pause / resume key: click it, press a key. It is
--- the same binding as Keybindings > AddOns > Forager, so the two agree.
--- The button takes the keyboard only while it waits for that one key press,
--- and lets go on the key, on Escape, on a second click and when the options
--- close: a frame holding the keyboard swallows every key (Forager 1.1.0).
-local function KeyCapture(parent, x, y)
-    local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    label:SetPoint("TOPLEFT", x + 4, y - 4)
-    label:SetText("Pause / resume key")
-
-    local b = TryCreate("Button", "ForagerPauseKeyButton", parent, { "UIPanelButtonTemplate" })
-    b:SetSize(120, 22)
-    b:SetPoint("TOPLEFT", x + 136, y)
-    local clear = TryCreate("Button", "ForagerPauseKeyClear", parent, { "UIPanelButtonTemplate" })
-    clear:SetSize(60, 22)
-    clear:SetPoint("LEFT", b, "RIGHT", 4, 0)
-    clear:SetText("Unbind")
-
-    local note = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    note:SetPoint("TOPLEFT", x + 4, y - 28)
-    note:SetWidth(COL - 20)
-    note:SetJustifyH("LEFT")
-
-    local capturing, pending
-
-    local function Show()
-        if capturing then return end
-        local key = PauseKeys()
-        b:SetText(key and KeyText(key) or "Not bound")
-        clear:SetEnabled(key ~= nil)
+-- The pause / resume key's button in the options (KeyCapture).
+local KeyCapture
+do
+    -- Binding names for a key the pause key would take over.
+    local function KeyText(key)
+        return (GetBindingText and GetBindingText(key)) or key
     end
 
-    local function Stop(message)
-        if capturing then
-            capturing, pending = false, nil
-            b:SetScript("OnKeyDown", nil)
-            b:EnableKeyboard(false)
+    local function ActionText(action)
+        return _G["BINDING_NAME_" .. action] or action
+    end
+
+    local function PauseKeys()
+        return GetBindingKey("FORAGER_TOGGLE")
+    end
+
+    local MODIFIER_KEYS = {
+        LSHIFT = true, RSHIFT = true, LCTRL = true, RCTRL = true, LALT = true, RALT = true,
+        LMETA = true, RMETA = true, UNKNOWN = true,
+    }
+
+    -- A button that binds the pause / resume key: click it, press a key. It is
+    -- the same binding as Keybindings > AddOns > Forager, so the two agree.
+    -- The button takes the keyboard only while it waits for that one key press,
+    -- and lets go on the key, on Escape, on a second click and when the options
+    -- close: a frame holding the keyboard swallows every key (Forager 1.1.0).
+    function KeyCapture(parent, x, y)
+        local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        label:SetPoint("TOPLEFT", x + 4, y - 4)
+        label:SetText("Pause / resume key")
+
+        local b = TryCreate("Button", "ForagerPauseKeyButton", parent, { "UIPanelButtonTemplate" })
+        b:SetSize(120, 22)
+        b:SetPoint("TOPLEFT", x + 136, y)
+        local clear = TryCreate("Button", "ForagerPauseKeyClear", parent, { "UIPanelButtonTemplate" })
+        clear:SetSize(60, 22)
+        clear:SetPoint("LEFT", b, "RIGHT", 4, 0)
+        clear:SetText("Unbind")
+
+        local note = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        note:SetPoint("TOPLEFT", x + 4, y - 28)
+        note:SetWidth(COL - 20)
+        note:SetJustifyH("LEFT")
+
+        local capturing, pending
+
+        local function Show()
+            if capturing then return end
+            local key = PauseKeys()
+            b:SetText(key and KeyText(key) or "Not bound")
+            clear:SetEnabled(key ~= nil)
         end
-        note:SetText(message or "")
-        Show()
-    end
 
-    local function Bind(key)
-        if InCombatLockdown() then
-            Stop("|cffff5050Key bindings can't be changed in combat.|r")
-            return
+        local function Stop(message)
+            if capturing then
+                capturing, pending = false, nil
+                b:SetScript("OnKeyDown", nil)
+                b:EnableKeyboard(false)
+            end
+            note:SetText(message or "")
+            Show()
         end
-        for _, old in ipairs({ PauseKeys() }) do SetBinding(old) end
-        local before = GetBindingAction(key)
-        local ok = SetBinding(key, "FORAGER_TOGGLE")
-        if not ok then
-            Stop("|cffff5050The game didn't take that key.|r")
-            return
-        end
-        SaveBindings(GetCurrentBindingSet())
-        Log("pause key bound to " .. key .. ((before ~= "" and before ~= "FORAGER_TOGGLE") and (", replacing " .. before) or ""))
-        Stop((before ~= "" and before ~= "FORAGER_TOGGLE") and ("Replaced " .. ActionText(before) .. ".") or nil)
-    end
 
-    local function OnKey(_, key)
-        if MODIFIER_KEYS[key] then return end
-        if key == "ESCAPE" then
+        local function Bind(key)
+            if InCombatLockdown() then
+                Stop("|cffff5050Key bindings can't be changed in combat.|r")
+                return
+            end
+            for _, old in ipairs({ PauseKeys() }) do SetBinding(old) end
+            local before = GetBindingAction(key)
+            local ok = SetBinding(key, "FORAGER_TOGGLE")
+            if not ok then
+                Stop("|cffff5050The game didn't take that key.|r")
+                return
+            end
+            SaveBindings(GetCurrentBindingSet())
+            Log("pause key bound to " .. key .. ((before ~= "" and before ~= "FORAGER_TOGGLE") and (", replacing " .. before) or ""))
+            Stop((before ~= "" and before ~= "FORAGER_TOGGLE") and ("Replaced " .. ActionText(before) .. ".") or nil)
+        end
+
+        local function OnKey(_, key)
+            if MODIFIER_KEYS[key] then return end
+            if key == "ESCAPE" then
+                Stop()
+                return
+            end
+            local full = (IsAltKeyDown() and "ALT-" or "") .. (IsControlKeyDown() and "CTRL-" or "")
+                .. (IsShiftKeyDown() and "SHIFT-" or "") .. key
+            local current = GetBindingAction(full)
+            if current ~= "" and current ~= "FORAGER_TOGGLE" and pending ~= full then
+                pending = full
+                note:SetText("|cffffb040" .. KeyText(full) .. " is used for " .. ActionText(current)
+                    .. ". Press it again to use it anyway, or press another key.|r")
+                return
+            end
+            Bind(full)
+        end
+
+        b:SetScript("OnClick", function()
+            if capturing then
+                Stop()
+                return
+            end
+            if InCombatLockdown() then
+                note:SetText("|cffff5050Key bindings can't be changed in combat.|r")
+                return
+            end
+            capturing = true
+            b:SetText("Press a key...")
+            note:SetText("Press the key you want. Escape cancels.")
+            b:SetScript("OnKeyDown", OnKey)
+            b:EnableKeyboard(true)
+        end)
+        clear:SetScript("OnClick", function()
             Stop()
-            return
-        end
-        local full = (IsAltKeyDown() and "ALT-" or "") .. (IsControlKeyDown() and "CTRL-" or "")
-            .. (IsShiftKeyDown() and "SHIFT-" or "") .. key
-        local current = GetBindingAction(full)
-        if current ~= "" and current ~= "FORAGER_TOGGLE" and pending ~= full then
-            pending = full
-            note:SetText("|cffffb040" .. KeyText(full) .. " is used for " .. ActionText(current)
-                .. ". Press it again to use it anyway, or press another key.|r")
-            return
-        end
-        Bind(full)
+            if InCombatLockdown() then
+                note:SetText("|cffff5050Key bindings can't be changed in combat.|r")
+                return
+            end
+            for _, old in ipairs({ PauseKeys() }) do SetBinding(old) end
+            SaveBindings(GetCurrentBindingSet())
+            Log("pause key unbound")
+            Show()
+        end)
+        parent:HookScript("OnHide", function() Stop() end)
+        optionRefreshers[#optionRefreshers + 1] = Show
     end
-
-    b:SetScript("OnClick", function()
-        if capturing then
-            Stop()
-            return
-        end
-        if InCombatLockdown() then
-            note:SetText("|cffff5050Key bindings can't be changed in combat.|r")
-            return
-        end
-        capturing = true
-        b:SetText("Press a key...")
-        note:SetText("Press the key you want. Escape cancels.")
-        b:SetScript("OnKeyDown", OnKey)
-        b:EnableKeyboard(true)
-    end)
-    clear:SetScript("OnClick", function()
-        Stop()
-        if InCombatLockdown() then
-            note:SetText("|cffff5050Key bindings can't be changed in combat.|r")
-            return
-        end
-        for _, old in ipairs({ PauseKeys() }) do SetBinding(old) end
-        SaveBindings(GetCurrentBindingSet())
-        Log("pause key unbound")
-        Show()
-    end)
-    parent:HookScript("OnHide", function() Stop() end)
-    optionRefreshers[#optionRefreshers + 1] = Show
 end
 
 -- The window style (Styles.lua does the choosing and the drawing) and the
@@ -2728,7 +3141,7 @@ local function PinButton(parent, x, y)
     b:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText("Track this and pause", 1, 1, 1)
-        GameTooltip:AddLine("Hold this key and click a tracker's icon to switch to it and pause the rotation, so it stays on. Press play to carry on. A plain click switches and the rotation carries on from there.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Hold this key and click a tracker's icon to switch to it and pause the rotation, so it stays on. While it is held, its glow turns reddish orange. Press play to carry on. A plain click switches and the rotation carries on from there.", 0.8, 0.8, 0.8, true)
         GameTooltip:AddLine("Left-click for the next key, right-click for the previous.", 0.6, 0.6, 0.6, true)
         GameTooltip:Show()
     end)
@@ -3110,88 +3523,90 @@ end
 -- pauses / resumes, drag to move
 ---------------------------------------------------------------------------
 
-local mmButton, mmIcon
+do
+    local mmButton, mmIcon
 
-local function PlaceMinimapButton()
-    local angle = math.rad(db.minimapAngle or 225)
-    local radius = (Minimap:GetWidth() or 140) / 2 + 6
-    -- Only while it sits on the minimap. A button collector (EllesmereUI's, for one) that
-    -- has taken the button keeps it where it put it.
-    if mmButton:GetParent() ~= Minimap then return end
-    mmButton:ClearAllPoints()
-    mmButton:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
-end
-
-Toggle = function(on)
-    if on == nil then on = not db.enabled end
-    db.enabled = on and true or false
-    if on then lastSwitch = GetTime() end
-    Print(db.enabled and "resumed" or "paused")
-    UpdateMinimapButton()
-    UpdateBar()
-    RefreshOptions()
-end
-
-UpdateMinimapButton = function()
-    if not Minimap then return end
-    if not mmButton then
-        if not db.minimap then return end
-        mmButton = CreateFrame("Button", "ForagerMinimapButton", Minimap)
-        mmButton:SetSize(31, 31)
-        mmButton:SetFrameStrata("MEDIUM")
-        mmButton:SetFrameLevel((Minimap:GetFrameLevel() or 1) + 8)
-        mmButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        mmButton:RegisterForDrag("LeftButton")
-        mmButton:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
-
-        local bg = mmButton:CreateTexture(nil, "BACKGROUND")
-        bg:SetSize(20, 20)
-        bg:SetPoint("TOPLEFT", 7, -5)
-        bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
-
-        mmIcon = mmButton:CreateTexture(nil, "ARTWORK")
-        mmIcon:SetSize(18, 18)
-        mmIcon:SetPoint("TOPLEFT", 7, -6)
-        mmIcon:SetTexture(ICON)
-        mmIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-
-        local border = mmButton:CreateTexture(nil, "OVERLAY")
-        border:SetSize(53, 53)
-        border:SetPoint("TOPLEFT")
-        border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
-
-        mmButton:SetScript("OnClick", function(_, button)
-            if button == "RightButton" then Toggle() else ToggleOptions() end
-        end)
-        mmButton:SetScript("OnDragStart", function(self)
-            self:SetScript("OnUpdate", function()
-                local mx, my = Minimap:GetCenter()
-                local scale = Minimap:GetEffectiveScale()
-                local cx, cy = GetCursorPosition()
-                if not (mx and my and cx and cy) then return end
-                db.minimapAngle = math.deg(math.atan2(cy / scale - my, cx / scale - mx)) % 360
-                PlaceMinimapButton()
-            end)
-        end)
-        mmButton:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
-        mmButton:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-            GameTooltip:SetText("Forager " .. (db.enabled and "|cff40ff40running|r" or "|cffff4040paused|r"), 1, 1, 1)
-            GameTooltip:AddLine(StatusText(), 0.85, 0.85, 0.85)
-            GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("Left-click: options", 0.7, 0.7, 0.7)
-            GameTooltip:AddLine("Right-click: pause / resume", 0.7, 0.7, 0.7)
-            GameTooltip:AddLine("Drag: move around the minimap", 0.7, 0.7, 0.7)
-            GameTooltip:Show()
-        end)
-        mmButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    local function PlaceMinimapButton()
+        local angle = math.rad(db.minimapAngle or 225)
+        local radius = (Minimap:GetWidth() or 140) / 2 + 6
+        -- Only while it sits on the minimap. A button collector (EllesmereUI's, for one) that
+        -- has taken the button keeps it where it put it.
+        if mmButton:GetParent() ~= Minimap then return end
+        mmButton:ClearAllPoints()
+        mmButton:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
     end
-    local s = Scan()
-    local on = s.active and s.byKey[s.active]
-    mmIcon:SetTexture(db.minimapShowsTracker and on and on.texture or ICON)
-    mmIcon:SetDesaturated(not db.enabled)
-    mmButton:SetShown(db.minimap and true or false)
-    PlaceMinimapButton()
+
+    Toggle = function(on)
+        if on == nil then on = not db.enabled end
+        db.enabled = on and true or false
+        if on then lastSwitch = GetTime() end
+        Print(db.enabled and "resumed" or "paused")
+        UpdateMinimapButton()
+        UpdateBar()
+        RefreshOptions()
+    end
+
+    UpdateMinimapButton = function()
+        if not Minimap then return end
+        if not mmButton then
+            if not db.minimap then return end
+            mmButton = CreateFrame("Button", "ForagerMinimapButton", Minimap)
+            mmButton:SetSize(31, 31)
+            mmButton:SetFrameStrata("MEDIUM")
+            mmButton:SetFrameLevel((Minimap:GetFrameLevel() or 1) + 8)
+            mmButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            mmButton:RegisterForDrag("LeftButton")
+            mmButton:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+            local bg = mmButton:CreateTexture(nil, "BACKGROUND")
+            bg:SetSize(20, 20)
+            bg:SetPoint("TOPLEFT", 7, -5)
+            bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+
+            mmIcon = mmButton:CreateTexture(nil, "ARTWORK")
+            mmIcon:SetSize(18, 18)
+            mmIcon:SetPoint("TOPLEFT", 7, -6)
+            mmIcon:SetTexture(ICON)
+            mmIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+
+            local border = mmButton:CreateTexture(nil, "OVERLAY")
+            border:SetSize(53, 53)
+            border:SetPoint("TOPLEFT")
+            border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+
+            mmButton:SetScript("OnClick", function(_, button)
+                if button == "RightButton" then Toggle() else ToggleOptions() end
+            end)
+            mmButton:SetScript("OnDragStart", function(self)
+                self:SetScript("OnUpdate", function()
+                    local mx, my = Minimap:GetCenter()
+                    local scale = Minimap:GetEffectiveScale()
+                    local cx, cy = GetCursorPosition()
+                    if not (mx and my and cx and cy) then return end
+                    db.minimapAngle = math.deg(math.atan2(cy / scale - my, cx / scale - mx)) % 360
+                    PlaceMinimapButton()
+                end)
+            end)
+            mmButton:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
+            mmButton:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+                GameTooltip:SetText("Forager " .. (db.enabled and "|cff40ff40running|r" or "|cffff4040paused|r"), 1, 1, 1)
+                GameTooltip:AddLine(StatusText(), 0.85, 0.85, 0.85)
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine("Left-click: options", 0.7, 0.7, 0.7)
+                GameTooltip:AddLine("Right-click: pause / resume", 0.7, 0.7, 0.7)
+                GameTooltip:AddLine("Drag: move around the minimap", 0.7, 0.7, 0.7)
+                GameTooltip:Show()
+            end)
+            mmButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        end
+        local s = Scan()
+        local on = s.active and s.byKey[s.active]
+        mmIcon:SetTexture(db.minimapShowsTracker and on and on.texture or ICON)
+        mmIcon:SetDesaturated(not db.enabled)
+        mmButton:SetShown(db.minimap and true or false)
+        PlaceMinimapButton()
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -3334,6 +3749,15 @@ SlashCmdList.FORAGER = function(msg)
         end
     elseif cmd == "track" then
         local raw = (msg or ""):match("^%s*%S+%s*(.-)%s*$") or ""
+        -- A hidden track has to be shown again before it can be used.
+        local function UseShown(i)
+            local t = db.tracks[i]
+            if t.hidden then
+                Print("\"" .. t.name .. "\" is hidden. Untick Hide this track in its tab in the options to use it.")
+            else
+                UseTrack(i)
+            end
+        end
         if arg == "" or arg == "next" then
             CycleTrack(1)
         elseif arg == "prev" or arg == "previous" then
@@ -3342,16 +3766,16 @@ SlashCmdList.FORAGER = function(msg)
             local name = raw:match("^%S+%s+(.+)$")
             NewTrack(name)
         elseif tonumber(arg) and db.tracks[tonumber(arg)] then
-            UseTrack(tonumber(arg))
+            UseShown(tonumber(arg))
         else
             local found
             for i, t in ipairs(db.tracks) do
                 if t.name:lower():find(arg, 1, true) then found = i break end
             end
-            if found then UseTrack(found)
+            if found then UseShown(found)
             else
                 local names = {}
-                for i, t in ipairs(db.tracks) do names[#names + 1] = i .. ". " .. t.name end
+                for i, t in ipairs(db.tracks) do names[#names + 1] = i .. ". " .. t.name .. (t.hidden and " (hidden)" or "") end
                 Print("tracks: " .. table.concat(names, ", ") .. ". /forager track next, previous, a number, a name, or new <name>.")
             end
         end
@@ -3475,6 +3899,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             } }
         end
         SelectTrack(db.track or 1)
+        db.tracks[db.track].hidden = nil -- the current track is always on show
         db.order = db.order or {}
         db.lastTracked = db.lastTracked or {}
         -- Sound left muted by a reload in the middle of a switch.
