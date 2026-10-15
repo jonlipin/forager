@@ -41,7 +41,8 @@ local DEFAULTS = {
     trackAlign = "start",  -- rows line up on the left (columns at the top), "center" or "end"
     trackGap = 12,         -- space between the tracks' rows (or columns), in pixels
     tracksApart = false,   -- each track's row moves on its own, saved per track
-    iconGap = 6,           -- space between the icons in a row, in pixels  -- hunter in a battleground or arena: Track Humanoids
+    iconGap = 6,           -- space between the icons in a row, in pixels
+    pinModifier = "SHIFT", -- this key + click on an icon: switch to it and pause (SHIFT, CTRL, ALT or NONE)  -- hunter in a battleground or arena: Track Humanoids
     style = "auto",        -- window style: "auto", "blizzard" or "dark" (Styles.lua)
     darkAlpha = 0.92,      -- the Dark style's background opacity
     sparkles = true,       -- sparkles round the active tracker's border
@@ -972,12 +973,40 @@ local function SwitchTo(key, source)
     local s = Scan()
     if s.on[key] then
         if InRotation(key) then currentKey = key end
-        return
+        return true
     end
-    if InCombatLockdown() then Print("tracking can't be switched in combat.") return end
+    if InCombatLockdown() then Print("tracking can't be switched in combat.") return false end
     local e = s.byKey[key]
-    if not e then Print("this character doesn't know that tracking spell.") return end
+    if not e then Print("this character doesn't know that tracking spell.") return false end
     Cast(e, source or "click")
+    return true
+end
+
+-- The key that, held with a click on an icon, switches to that tracker and
+-- pauses the rotation so it stays on (Shift by default; set in the options).
+local PIN_KEYS = { "SHIFT", "CTRL", "ALT", "NONE" }
+local PIN_NAMES = { SHIFT = "Shift", CTRL = "Ctrl", ALT = "Alt", NONE = "Off" }
+
+local function PinHeld()
+    local m = db.pinModifier or "SHIFT"
+    if m == "SHIFT" then return IsShiftKeyDown() and true or false end
+    if m == "CTRL" then return IsControlKeyDown() and true or false end
+    if m == "ALT" then return IsAltKeyDown() and true or false end
+    return false
+end
+
+-- Switches to a tracker and pauses the rotation there: it stays on until you
+-- press play.
+local function PinTracker(key)
+    if not SwitchTo(key) then return end
+    Log("pinned " .. tostring(key))
+    if db.enabled then
+        db.enabled = false
+        Print(NameOf(Scan(), key) .. " is on, and the rotation is paused. Press play to carry on.")
+        if UpdateMinimapButton then UpdateMinimapButton() end
+        if RefreshOptions then RefreshOptions() end
+    end
+    if UpdateBar then UpdateBar() end
 end
 
 -- The position is the bar's center in UIParent units, so changing the icon
@@ -1363,7 +1392,11 @@ local function TrackButton(slot, i)
     -- Left-click turns the tracker on, whichever row it is in; right-click
     -- leaves it out of that row's track, or puts it back.
     b:SetScript("OnClick", function(self, button)
-        if button == "RightButton" then ToggleSkip(self.key, slot.track) elseif self.key then SwitchTo(self.key) end
+        if button == "RightButton" then
+            ToggleSkip(self.key, slot.track)
+        elseif self.key then
+            if PinHeld() then PinTracker(self.key) else SwitchTo(self.key) end
+        end
     end)
     Draggable(b, slot)
     Tooltip(b, function(self)
@@ -1375,6 +1408,9 @@ local function TrackButton(slot, i)
         if out then lines[#lines + 1] = "|cff9d9d9dLeft out of the rotation|r" end
         if ManyRows() then lines[#lines + 1] = "Track: " .. t.name end
         if not s.on[self.key] then lines[#lines + 1] = "Left-click: track this now" end
+        if (db.pinModifier or "SHIFT") ~= "NONE" then
+            lines[#lines + 1] = PIN_NAMES[db.pinModifier or "SHIFT"] .. "-click: track this and pause the rotation"
+        end
         lines[#lines + 1] = out and "Right-click: put it back in the rotation" or "Right-click: leave it out of the rotation"
         if not db.barLocked then lines[#lines + 1] = "Drag: move" end
         return lines
@@ -2678,6 +2714,33 @@ local function SetIconShape(shape)
     RefreshOptions()
 end
 
+-- Which key, held with a click on an icon, switches to that tracker and
+-- pauses the rotation. Left-click for the next, right-click for the previous.
+local function PinButton(parent, x, y)
+    local b = PanelButton(parent, "", x, y, 236, function(_, mouse)
+        local i = 1
+        for n, k in ipairs(PIN_KEYS) do if k == (db.pinModifier or "SHIFT") then i = n end end
+        i = (i - 1 + (mouse == "RightButton" and -1 or 1)) % #PIN_KEYS + 1
+        db.pinModifier = PIN_KEYS[i]
+        RefreshOptions()
+    end)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Track this and pause", 1, 1, 1)
+        GameTooltip:AddLine("Hold this key and click a tracker's icon to switch to it and pause the rotation, so it stays on. Press play to carry on. A plain click switches and the rotation carries on from there.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Left-click for the next key, right-click for the previous.", 0.6, 0.6, 0.6, true)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    optionRefreshers[#optionRefreshers + 1] = function()
+        local m = db.pinModifier or "SHIFT"
+        b:SetText(m == "NONE" and "Track and pause on click: off" or ("Track and pause: " .. PIN_NAMES[m] .. "-click"))
+    end
+    ns.pinButton = b
+    return b
+end
+
 local function ShapeButton(parent, x, y)
     local b = PanelButton(parent, "", x, y, 176, function(_, mouse)
         local i = 1
@@ -2793,31 +2856,32 @@ local function BuildContent()
     OptionCheck(c, "Show the seconds to the next switch", "barCountdown", RIGHT, -82, Refresh)
     OptionCheck(c, "Swipe down to the next switch", "barSwipe", RIGHT, -108, Refresh)
     OptionCheck(c, "Hide them in combat", "barHideCombat", RIGHT, -134, Refresh)
-    OptionCheck(c, "Sparkles on the active tracker", "sparkles", RIGHT, -160, function() Refresh() RefreshOptions() end)
-    EffectButton(c, RIGHT + 212, -160)
-    SparkleSliders(c, RIGHT, -192)
-    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -280, "%", 5, function() LayoutBar() end)
-    PanelButton(c, "Reset position", RIGHT, -326, 130, ResetBarPosition)
-    ShapeButton(c, RIGHT + 138, -326)
+    PinButton(c, RIGHT, -162)
+    OptionCheck(c, "Sparkles on the active tracker", "sparkles", RIGHT, -192, function() Refresh() RefreshOptions() end)
+    EffectButton(c, RIGHT + 212, -192)
+    SparkleSliders(c, RIGHT, -224)
+    OptionSlider(c, "Icon size", "barScale", 60, 200, RIGHT, -312, "%", 5, function() LayoutBar() end)
+    PanelButton(c, "Reset position", RIGHT, -358, 130, ResetBarPosition)
+    ShapeButton(c, RIGHT + 138, -358)
 
-    Header(c, "Minimap", RIGHT, -364)
-    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -390, function()
+    Header(c, "Minimap", RIGHT, -396)
+    OptionCheck(c, "Show the minimap button", "minimap", RIGHT, -422, function()
         UpdateMinimapButton()
         if not db.minimap then Print("minimap button hidden. /forager opens the options.") end
     end)
-    OptionCheck(c, "Show the current tracker on it", "minimapShowsTracker", RIGHT, -416, function() UpdateMinimapButton() end)
+    OptionCheck(c, "Show the current tracker on it", "minimapShowsTracker", RIGHT, -448, function() UpdateMinimapButton() end)
 
-    Header(c, "Swap for the situation", RIGHT, -454)
-    OptionCheck(c, "Fishing pole equipped: Find Fish", "swapFishing", RIGHT, -480)
-    OptionCheck(c, "Cat Form: Track Humanoids", "swapCatForm", RIGHT, -506)
-    OptionCheck(c, "Hunter in a battleground: Track Humanoids", "swapHunterPvP", RIGHT, -532)
+    Header(c, "Swap for the situation", RIGHT, -486)
+    OptionCheck(c, "Fishing pole equipped: Find Fish", "swapFishing", RIGHT, -512)
+    OptionCheck(c, "Cat Form: Track Humanoids", "swapCatForm", RIGHT, -538)
+    OptionCheck(c, "Hunter in a battleground: Track Humanoids", "swapHunterPvP", RIGHT, -564)
 
-    Header(c, "Keys", RIGHT, -570)
-    KeyCapture(c, RIGHT, -596)
+    Header(c, "Keys", RIGHT, -602)
+    KeyCapture(c, RIGHT, -628)
 
-    Header(c, "Status", RIGHT, -654)
+    Header(c, "Status", RIGHT, -686)
     local status = c:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    status:SetPoint("TOPLEFT", RIGHT + 4, -682)
+    status:SetPoint("TOPLEFT", RIGHT + 4, -714)
     status:SetWidth(COL - 20)
     status:SetJustifyH("LEFT")
     status:SetSpacing(3)

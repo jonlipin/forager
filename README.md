@@ -11,7 +11,8 @@ Want more? Add **Find Treasure**, or a hunter's **Track Beasts**, **Track Humano
 - **Tracker icons on screen.**
   - The tracker that's on glows like a proc on your action bars, with optional sparkles around it (eight effects, size and intensity sliders).
   - The next one shows a cooldown swipe and the seconds until it switches.
-  - Click an icon to switch to it straight away, with its sound.
+  - Click an icon to switch to it straight away, with its sound; the rotation carries on from it.
+  - Shift-click an icon to switch to it and pause the rotation, so it stays on until you press play. The key can be Shift, Ctrl or Alt, or off, in the options.
   - Right-click an icon to leave that tracker out of the rotation for now. It turns grey and is skipped until you right-click it again, and a left-click still turns it on. Leave all but one out and Forager keeps that one on.
   - A play / stop button pauses and resumes the rotation.
   - Move, resize and lock them, stack them vertically, or hide them in combat.

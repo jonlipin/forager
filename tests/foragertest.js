@@ -2586,5 +2586,49 @@ run('Move Tracks Separately moves Vertical, alignment and icon gap into each tra
   check(p2[1] == "LEFT", "Hunting follows the shared settings again")
   check(ForagerDB.tracks[2].vertical == true, "its own settings kept for next time")
 `);
+run('a plain click jumps to a tracker and the rotation carries on from it', TRACKBTN + `
+  ForagerDB.rotation[1494] = true
+  T.advance(6.5) check(T.active() == "Find Herbs", "rotating, herbs on")
+  local beasts = T.trackButton("Track Beasts")
+  beasts.scripts.OnClick(beasts, "LeftButton")
+  T.advance(1)
+  check(T.active() == "Track Beasts", "jumped to beasts")
+  check(ForagerDB.enabled == true, "still running")
+  T.advance(4) check(T.active() == "Track Beasts", "its full time first")
+  T.advance(2) check(T.active() ~= "Track Beasts", "then the rotation moves on: " .. tostring(T.active()))
+`);
+run('Shift-click (or the key set in the options) jumps to a tracker and pauses the rotation', TRACKBTN + OPEN + `
+  ForagerDB.rotation[1494] = true
+  T.advance(6.5) check(T.active() == "Find Herbs", "rotating")
+  local beasts = T.trackButton("Track Beasts")
+  IsShiftKeyDown = function() return true end
+  beasts.scripts.OnClick(beasts, "LeftButton")
+  IsShiftKeyDown = function() return false end
+  T.advance(1)
+  check(T.active() == "Track Beasts" and ForagerDB.enabled == false, "beasts on and the rotation paused")
+  T.advance(30) check(T.active() == "Track Beasts", "and it stays on")
+  -- Ctrl instead: Shift-click now just switches.
+  local b = NS.pinButton
+  b.scripts.OnClick(b, "LeftButton")
+  check(ForagerDB.pinModifier == "CTRL" and rawget(b, "text") == "Track and pause: Ctrl-click", "set to Ctrl: " .. tostring(rawget(b, "text")))
+  SlashCmdList.FORAGER("on")
+  local herbs = T.trackButton("Find Herbs")
+  IsShiftKeyDown = function() return true end
+  herbs.scripts.OnClick(herbs, "LeftButton")
+  IsShiftKeyDown = function() return false end
+  T.advance(1)
+  check(T.active() == "Find Herbs" and ForagerDB.enabled == true, "Shift-click no longer pauses")
+  IsControlKeyDown = function() return true end
+  beasts.scripts.OnClick(beasts, "LeftButton")
+  IsControlKeyDown = function() return false end
+  T.advance(1)
+  check(T.active() == "Track Beasts" and ForagerDB.enabled == false, "Ctrl-click does")
+  ForagerDB.pinModifier = "NONE"
+  SlashCmdList.FORAGER("on")
+  IsControlKeyDown = function() return true end
+  herbs.scripts.OnClick(herbs, "LeftButton")
+  IsControlKeyDown = function() return false end
+  check(ForagerDB.enabled == true, "off: no click pauses")
+`);
 console.log(`${pass} checks passed, ${fail} failed` + (EUI_ON ? ' (with a stand-in EllesmereUI)' : ''));
 process.exit(fail ? 1 : 0);
