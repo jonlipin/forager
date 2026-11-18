@@ -18,6 +18,9 @@ T.tracking = {
 }
 T.cvars = { Sound_EnableSFX = "1" }
 T.sfxLog = {}
+T.mutedFiles = {}
+function MuteSoundFile(id) T.mutedFiles[id] = true end
+function UnmuteSoundFile(id) T.mutedFiles[id] = nil end
 function GetCVar(k) return T.cvars[k] end
 function SetCVar(k, v) T.cvars[k] = v if k == "Sound_EnableSFX" then T.sfxLog[#T.sfxLog + 1] = { T.now, v } end end
 function GetInventoryItemID(_, slot) if slot == 16 then return T.mainHand end end
@@ -68,8 +71,9 @@ C_Minimap = {
     local fromKey = T.inKey
     if T.blockAll or (T.blockTimer and not fromKey) then fire("ADDON_ACTION_BLOCKED", "Forager", "UNKNOWN()") return end
     T.sfxAtCast = T.cvars.Sound_EnableSFX
+    if T.tracking[i].spellID == 5225 and on then T.humanoidsMutedAtCast = T.mutedFiles[569767] end
     local function land()
-      if T.tracking[i].spellID ~= 2481 then
+      if on and T.tracking[i].spellID ~= 2481 then
         for _, t in ipairs(T.tracking) do if t.type == "spell" and t.spellID ~= 2481 then t.active = false end end
       end
       T.tracking[i].active = on
@@ -593,12 +597,17 @@ run('tracking comes back after death', DIE + `
   T.die() T.advance(30) check(T.active() == nil, "nothing while dead")
   T.dead = false T.advance(1) check(T.active() == "Find Herbs", "herbs restored, got " .. tostring(T.active()))
 `);
-run('restores after death while paused, and a manual pick too', DIE + `
-  SlashCmdList.FORAGER("off")
-  T.tracking[3].active = true T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
-  T.die() T.advance(5)
-  T.dead = false T.advance(1) check(T.active() == "Track Beasts", "beasts restored while paused, got " .. tostring(T.active()))
-`);
+for (const pause of ['SlashCmdList.FORAGER("off")', 'T.resting = true']) {
+  run('resurrection respects pause: ' + pause, DIE + `
+    ${pause}
+    T.tracking[3].active = true T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
+    T.die() T.advance(5)
+    T.dead = false T.advance(1) check(T.active() == nil, "no restore while paused")
+    C_Minimap.SetTracking(2, true) T.advance(2)
+    SlashCmdList.FORAGER("on") T.resting = false T.advance(2)
+    check(T.active() == "Find Minerals", "resume keeps the manual choice instead of restoring Beasts")
+  `, { db: '{ rotation = { [2580] = true } }' });
+}
 run('nothing restored when the option is off or tracking was off', DIE + `
   T.advance(6.5) ForagerDB.restoreAfterDeath = false SlashCmdList.FORAGER("off")
   T.die() T.dead = false T.advance(2) check(T.active() == nil, "option off")
@@ -616,6 +625,54 @@ run('quiet switches mute sound effects only around the switch', `
   check(T.sfxLog[2][1] - T.sfxLog[1][1] <= 1.5, "muted for at most a moment")
   ForagerDB.quiet = false T.advance(7) check(T.sfxAtCast == "1", "not muted with the option off")
 `);
+run('quiet Cat Form swaps release the shared sound as soon as the tracking switch settles', `
+  T.form = 1 T.advance(0.25)
+  check(T.active() == "Track Humanoids" and T.humanoidsMutedAtCast, "file muted before automatic cast")
+  check(T.mutedFiles[569767] and #T.sfxLog == 0, "only this file muted during tracking update")
+  T.advance(0.5) check(not T.mutedFiles[569767], "shared sound restored before the next ability")
+  ForagerDB.quiet = false
+  C_Minimap.SetTracking(6, false) T.advance(2)
+  check(T.active() == "Track Humanoids" and not T.humanoidsMutedAtCast, "option off leaves the sound on")
+`);
+run('removing Cat Form tracking immediately releases the shared sound', `
+  T.form = 1 T.advance(0.25)
+  check(T.active() == "Track Humanoids" and T.mutedFiles[569767], "application muted")
+  T.form = nil C_Minimap.SetTracking(6, false)
+  check(T.active() == nil and not T.mutedFiles[569767], "removal releases mute without waiting for the next tick")
+`);
+run('quiet Cat Form swaps wait for a delayed tracking update and expire without one', `
+  T.lag = 0.75 T.form = 1 T.advance(0.75)
+  check(T.active() == nil and T.mutedFiles[569767], "mute stays on while tracking is pending")
+  T.advance(0.25)
+  check(T.active() == "Track Humanoids" and T.mutedFiles[569767], "mute covers the tracking update")
+  T.advance(0.5) check(not T.mutedFiles[569767], "shared sound restored shortly after delayed update")
+  T.lag = nil C_Minimap.SetTracking(6, false)
+  T.lag = 10 T.advance(1.5)
+  check(T.active() == nil and T.mutedFiles[569767], "next cast is still pending")
+  T.combat = true T.advance(2.25)
+  check(not T.mutedFiles[569767], "shared sound restored even without a tracking update")
+`);
+run('quiet Cat Form swaps restore the file for an explicit click and on logout', `
+  ForagerDB.rotation[5225] = true
+  T.form = 1 T.advance(0.25)
+  local button
+  for _, frame in ipairs(T.frames) do
+    if rawget(frame, "key") == 5225 and frame.scripts.OnClick then button = frame break end
+  end
+  check(button and T.mutedFiles[569767], "tracker button and active file mute")
+  C_Minimap.SetTracking(6, false)
+  button.scripts.OnClick(button, "LeftButton")
+  check(T.active() == "Track Humanoids" and not T.humanoidsMutedAtCast, "click keeps its sound")
+  C_Minimap.SetTracking(6, false) T.advance(1.5)
+  check(T.mutedFiles[569767], "file muted on another automatic switch")
+  T.fire("PLAYER_LOGOUT")
+  check(not T.mutedFiles[569767], "file restored on logout or reload")
+`);
+run('quiet Cat Form swaps fall back to SFX where file muting is unavailable', `
+  MuteSoundFile = nil
+  T.form = 1 T.advance(1)
+  check(T.active() == "Track Humanoids" and T.sfxAtCast == "0", "original SFX mute used as fallback")
+`);
 run('a switch waits while the loot window is open', `
   T.fire("LOOT_OPENED") T.advance(10) check(T.active() == nil, "no switch while looting")
   T.fire("LOOT_CLOSED") T.advance(0.5) check(T.active() == "Find Herbs", "switches when it closes")
@@ -627,11 +684,93 @@ run('a fishing pole swaps in Find Fish and hands back to the rotation', `
   T.mainHand = 1234 T.advance(2) check(T.active() == "Find Minerals" or T.active() == "Find Herbs", "rotation back at once, got " .. tostring(T.active()))
   T.advance(14) check(T.switches >= 4, "rotation keeps going, " .. tostring(T.switches))
 `);
-run('Cat Form tracks humanoids; paused rotation gets the old tracker back', `
-  T.advance(6.5) SlashCmdList.FORAGER("off")
+run('manual pause leaves tracking alone and resume uses the current form', `
+  T.advance(6.5) check(T.active() == "Find Minerals", "minerals on")
+  SlashCmdList.FORAGER("off")
+  T.form = 1 T.advance(3) check(T.active() == "Find Minerals" and T.switches == 1, "no Cat Form swap while paused")
+  C_Minimap.SetTracking(3, true) T.advance(8)
+  check(T.active() == "Track Beasts" and T.switches == 2, "manual choice stays on")
+  SlashCmdList.FORAGER("on") T.advance(8)
+  check(T.active() == "Track Humanoids" and T.switches == 3, "one swap on resume in Cat Form")
+  SlashCmdList.FORAGER("off") T.form = nil T.advance(3)
+  check(T.active() == "Track Humanoids" and T.switches == 3, "ending the situation does not restore tracking while paused")
+  T.form = 1 SlashCmdList.FORAGER("on") T.advance(3)
+  check(T.switches == 3, "resuming the same situation does not cast again")
+  T.combat = true T.form = nil T.advance(3)
+  check(T.switches == 3, "no swap on leaving Cat Form in combat")
+  T.combat = false T.advance(2)
+  check(T.active() == "Find Minerals" and T.switches == 4, "minerals back after Cat Form")
+  ForagerDB.swapCatForm = false T.form = 1 T.advance(5) check(T.switches == 4, "option off")
+`, { db: '{ rotation = { [2580] = true } }' });
+run('automatic Find Minerals waits two seconds after Cat Form', `
+  T.form = 1 T.advance(3)
+  T.form = nil T.tracking[6].active = false T.fire("MINIMAP_UPDATE_TRACKING") T.advance(1.75)
+  check(T.active() == nil and T.switches == 1, "minerals still waiting")
+  T.form = 1 T.advance(3)
+  check(T.active() == "Track Humanoids" and T.switches == 2, "back in Cat Form before minerals were applied")
+  T.form = nil T.tracking[6].active = false T.fire("MINIMAP_UPDATE_TRACKING") T.advance(1.75)
+  check(T.active() == nil and T.switches == 2, "new exit starts a fresh wait")
+  T.advance(0.5)
+  check(T.active() == "Find Minerals" and T.switches == 3, "one automatic switch after the wait")
+  T.form = 1 T.advance(3)
+  T.form = nil T.tracking[6].active = false T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
+  check(T.active() == nil, "automatic switch is still waiting")
+  SlashCmdList.FORAGER("switch")
+  check(T.active() == "Find Minerals", "explicit switch bypasses the wait")
+`, { db: '{ rotation = { [2580] = true } }' });
+run('return to another tracker after Cat Form has no new wait', `
+  T.form = 1 T.advance(3)
+  T.form = nil T.tracking[6].active = false T.fire("MINIMAP_UPDATE_TRACKING") T.advance(0.5)
+  check(T.active() == "Find Herbs", "herbs resume without the minerals delay")
+`);
+run('resting clears automatic Cat Form tracking and holds the rotation', `
   T.form = 1 T.advance(2) check(T.active() == "Track Humanoids", "humanoids in Cat Form")
-  T.form = nil T.advance(2) check(T.active() == "Find Herbs", "herbs back after Cat Form, got " .. tostring(T.active()))
-  ForagerDB.swapCatForm = false T.form = 1 T.advance(5) check(T.active() == "Find Herbs", "option off")
+  T.tracking[2].active = true -- another tracker can already be on beside Cat Form tracking
+  T.combat = true T.resting = true T.advance(2)
+  check(T.tracking[6].active and T.switches == 1, "no cleanup in combat")
+  T.combat = false T.advance(8)
+  check(not T.tracking[6].active and T.tracking[2].active and T.switches == 2, "only humanoids turned off, once")
+  T.resting = false T.advance(2)
+  check(T.active() == "Track Humanoids" and T.switches == 3, "same form resumes humanoid tracking")
+  T.combat = true T.form = nil T.advance(2) -- the situation ends before the rotation can take over
+  T.resting = true T.combat = false T.advance(8)
+  check(T.active() == nil and T.switches == 4, "no handoff to rotation while resting")
+  T.resting = false T.advance(2)
+  check(T.active() == "Find Minerals" and T.switches == 5, "minerals back on leaving the rest area")
+  T.resting = true T.form = 1 T.advance(8)
+  check(T.active() == "Find Minerals" and T.switches == 5, "no new situation while resting")
+  SlashCmdList.FORAGER("off") T.resting = false T.advance(3)
+  check(T.switches == 5, "leaving town does not clear manual pause")
+  SlashCmdList.FORAGER("on") T.advance(8)
+  check(T.active() == "Track Humanoids" and T.switches == 6, "one swap back to humanoids")
+`, { db: '{ rotation = { [2580] = true } }' });
+run('Cat Form cleanup respects manual tracking and manual pause', `
+  T.form = 1 C_Minimap.SetTracking(6, true) T.advance(2)
+  T.resting = true T.advance(5)
+  check(T.tracking[6].active and T.switches == 1, "humanoids picked manually outside town stay on")
+  T.resting = false C_Minimap.SetTracking(6, false) T.advance(3)
+  check(T.tracking[6].active and T.switches == 3, "Forager put humanoids back on outside town")
+  SlashCmdList.FORAGER("off") T.resting = true T.advance(4)
+  check(T.tracking[6].active and T.switches == 3, "manual pause prevents cleanup")
+  SlashCmdList.FORAGER("on") T.advance(3)
+  check(not T.tracking[6].active and T.switches == 4, "rest cleanup runs when manual pause is lifted")
+  C_Minimap.SetTracking(6, true) T.advance(4)
+  check(T.tracking[6].active and T.switches == 5, "humanoids picked manually inside town stay on")
+`);
+run('Cat Form cleanup is attempted only once per rest visit', `
+  T.form = 1 T.advance(2)
+  local setTracking, clears = C_Minimap.SetTracking, 0
+  C_Minimap.SetTracking = function(index, on)
+    if on then return setTracking(index, on) end
+    clears = clears + 1 -- simulate a client that silently refuses to turn it off
+  end
+  ForagerDB.pauseResting = false T.resting = true T.advance(4)
+  check(clears == 0, "no cleanup if Pause in cities and inns is off")
+  ForagerDB.pauseResting = true T.advance(5)
+  check(clears == 1, "a refused cleanup does not repeat")
+  T.resting = false T.advance(2)
+  T.resting = true T.advance(5)
+  check(clears == 2, "new visit makes one new attempt")
 `);
 run('hunters track humanoids in battlegrounds', `
   T.class = "HUNTER" T.instance = "pvp"
@@ -1921,6 +2060,9 @@ run('a kept-on tracker comes back if it drops off', TREASURE + `
   T.advance(3) check(T.tracking[#T.tracking].active, "treasure back on")
   SlashCmdList.FORAGER("off") T.tracking[#T.tracking].active = false
   T.advance(5) check(not T.tracking[#T.tracking].active, "not while paused")
+  T.resting = true SlashCmdList.FORAGER("on")
+  T.advance(5) check(not T.tracking[#T.tracking].active, "not while resting")
+  T.resting = false T.advance(3) check(T.tracking[#T.tracking].active, "back on outside the rest area")
 `);
 run('a tracker that unexpectedly stays on does not stick the rotation', `
   ForagerDB.rotation[1494] = true

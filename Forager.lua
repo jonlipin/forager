@@ -12,6 +12,7 @@ local ADDON, ns = ...
 ns.report = {}
 
 local HERBS, MINERALS = 2383, 2580
+local DRUID_TRACK_HUMANOIDS = 5225
 local ICON = "Interface\\Icons\\INV_Misc_Flower_02"
 
 local DEFAULTS = {
@@ -62,6 +63,7 @@ local DEFAULTS = {
 local db
 function ns.DB() return db end
 local lastSwitch = 0  -- GetTime() of the last change of tracking spell
+local mineralsResumeAt = 0 -- earliest automatic Find Minerals after leaving Cat Form
 local lastActive       -- key of the tracking spell last seen on
 local attempt          -- the switch waiting to be confirmed
 local silentFails = 0
@@ -69,11 +71,13 @@ local lateCheck        -- a switch not on after 1 s, waiting a little longer for
 local LATE_WAIT = 3    -- more seconds a switch gets to land before it counts as ignored
 local failing = {}     -- [key] = GetTime() until which a tracker that failed to cast is skipped
 local looting = false  -- the loot window is open
-local override         -- { key, name, why, before } while a situation calls for a tracker
+local override         -- { key, name, why } while a situation calls for a tracker
 local ownedKey         -- a situational tracker Forager put on, which the rotation may replace
+local ownedSituation   -- why Forager put that tracker on
 local currentKey       -- the rotation tracker Forager last switched to, while it is on
 local placedKey        -- any tracker Forager last turned on (so it is never "your own pick")
 local mutedAt          -- GetTime() when Forager muted sound effects
+local humanoidsMute    -- { deadline, applied } for the druid's tracking sound
 local Mute, Unmute     -- defined with Cast
 local RefreshOptions, UpdateMinimapButton, SetUpKeys, UpdateBar, Toggle -- defined below
 
@@ -303,15 +307,25 @@ local function Moving()
     return not ok or moving
 end
 
--- Returns nil when a switch may happen now, else the reason it may not.
-local function Blocker(s)
-    if override then return "using " .. override.name .. " (" .. override.why .. ")" end
+local function RestPaused()
+    return db.pauseResting and IsResting()
+end
+
+-- Both pauses stop the rotation and new automatic tracking.
+local function PauseReason()
     if not db.enabled then return "paused" end
+    if RestPaused() then return "in a city or inn" end
+end
+
+-- Returns nil when a rotation switch may happen now, else the reason it may not.
+local function Blocker(s)
+    local pause = PauseReason()
+    if pause then return pause end
+    if override then return "using " .. override.name .. " (" .. override.why .. ")" end
     if db.method == "none" then return "the game refuses the switch" end
     if InCombatLockdown() or UnitAffectingCombat("player") then return "in combat" end
     if UnitIsDeadOrGhost("player") then return "dead" end
     if UnitOnTaxi("player") then return "on a flight" end
-    if db.pauseResting and IsResting() then return "in a city or inn" end
     if db.pauseInstances then
         local inside, kind = IsInInstance()
         if inside and kind ~= "none" then return "in a dungeon, raid or battleground" end
@@ -329,6 +343,7 @@ local function Blocker(s)
         if #s.rotation == 1 then return s.rotation[1].name .. " is the only one in the rotation" end
         return "the other trackers can't be cast right now"
     end
+    if nextEntry.key == MINERALS and GetTime() < mineralsResumeAt then return "waiting after Cat Form" end
     -- Key press mode only switches while you press keys anyway.
     if db.onlyMoving and db.method ~= "key" and not Moving() then return "standing still" end
 end
@@ -370,6 +385,7 @@ end
 local function Landed(a, s, late)
     a.landed = true
     placedKey = a.target
+    if a.situation then ownedKey, ownedSituation = a.target, a.situation end
     if InRotation(a.target) and not (s.byKey[a.target] and s.byKey[a.target].alongside) then
         currentKey = a.target
     end
@@ -434,8 +450,26 @@ end
 -- Each switch is a spell cast with its own sound. Sound effects are muted
 -- from the cast until just after it lands (2 s at most). db.unmuteSFX lets a
 -- reload or crash in between put the sound back at the next login.
-Mute = function()
+-- Forever's Druid Track Humanoids has a separate Play Sound effect (SoundKit
+-- 2561). Other spells share its file, so release it shortly after tracking lands.
+local HUMANOIDS_SOUND_FILE = 569767
+
+local function UnmuteHumanoids()
+    if not humanoidsMute then return end
+    pcall(UnmuteSoundFile, HUMANOIDS_SOUND_FILE)
+    humanoidsMute = nil
+end
+
+Mute = function(e)
     if not db.quiet then return end
+    if e.key == DRUID_TRACK_HUMANOIDS and MuteSoundFile and UnmuteSoundFile then
+        if humanoidsMute then return end
+        local ok, result = pcall(MuteSoundFile, HUMANOIDS_SOUND_FILE)
+        if ok and result ~= false then
+            humanoidsMute = { deadline = GetTime() + 2 } -- failsafe if tracking never lands
+            return
+        end
+    end
     if mutedAt then
         mutedAt = GetTime()
         return
@@ -454,10 +488,14 @@ Unmute = function()
     mutedAt, db.unmuteSFX = nil, nil
 end
 
-local function Cast(e, source)
+local function Cast(e, source, situation)
     -- A click or a key press of your own keeps the switch's sound, as feedback.
-    if source ~= "click" and source ~= "binding" then Mute() end
-    attempt = { at = GetTime(), target = e.key, name = e.name, source = source }
+    if source ~= "click" and source ~= "binding" then
+        Mute(e)
+    elseif e.key == DRUID_TRACK_HUMANOIDS then
+        UnmuteHumanoids()
+    end
+    attempt = { at = GetTime(), target = e.key, name = e.name, source = source, situation = situation }
     local ok, err = pcall(C_Minimap.SetTracking, e.index, true)
     if not ok then Log("SetTracking error: " .. tostring(err)) end
     C_Timer.After(1, Verify)
@@ -602,7 +640,7 @@ local function MoveTrackTo(from, to)
 end
 
 -- Death clears tracking. Each character's last tracker is remembered and put
--- back once you're alive again, whether or not the rotation is running.
+-- back once you're alive again and Forager is running.
 local deathAt, aliveAt
 
 local function RememberTracker(active)
@@ -619,6 +657,8 @@ end
 local function TryRestore()
     if not deathAt then return end
     if UnitIsDeadOrGhost("player") then aliveAt = nil return end
+    -- Skip this restore so it cannot replace tracking chosen during the pause.
+    if PauseReason() then deathAt, aliveAt = nil, nil return end
     aliveAt = aliveAt or GetTime()
     local s = Scan()
     local key = db.lastTracked[UnitGUID("player") or ""]
@@ -640,7 +680,7 @@ end
 -- Ticked trackers that stay on alongside the rotation (Find Treasure) are
 -- put back whenever they are off, while Forager is running.
 local function KeepOn()
-    if not db.enabled or override then return end
+    if PauseReason() or override then return end
     if InCombatLockdown() or UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") or UnitOnTaxi("player") then return end
     if attempt and not attempt.done then return end
     local s = Scan()
@@ -658,9 +698,10 @@ end
 -- battleground calls for goes on in place of the rotation (UpdateSituation).
 local UpdateSituation
 do
+    local restCleanupTried
     -- Trackers a situation calls for. Track Humanoids is a druid spell (Cat
     -- Form) and a hunter spell; Find Fish came with the Weather-Beaten Journal.
-    local TRACK_HUMANOIDS = { [5225] = true, [19883] = true }
+    local TRACK_HUMANOIDS = { [DRUID_TRACK_HUMANOIDS] = true, [19883] = true }
     local FIND_FISH = { [43308] = true }
 
     local function FindEntry(s, ids, name)
@@ -704,14 +745,36 @@ do
         end
     end
 
-    -- Puts on the tracker a situation calls for, and when it's over hands back
-    -- to the rotation, or to what was on before when the rotation is paused.
+    -- Drop only the tracking we put on for Cat Form. Do not repeat the request
+    -- during this rest visit, even if the game refuses it or the player turns it back on.
+    local function ClearCatTracking()
+        if ownedSituation ~= "Cat Form" then return end
+        if InCombatLockdown() or UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") or UnitOnTaxi("player") then return end
+        if Busy() or (attempt and not attempt.done) then return end
+        local s = Scan()
+        local e = s.byKey[ownedKey]
+        if not e or not e.active or OnCooldown(e.key) then return end
+        restCleanupTried = true
+        Log("resting: turning off " .. e.name .. " from Cat Form")
+        local ok, err = pcall(C_Minimap.SetTracking, e.index, false)
+        if not ok then Log("SetTracking error: " .. tostring(err)) end
+    end
+
+    -- Hands back to the rotation when the situation is over. Keep the override
+    -- through a pause so that handoff still happens on resume.
     function UpdateSituation()
+        local resting = RestPaused()
+        if not resting then restCleanupTried = nil end
+        if not db.enabled then return end
+        if resting then
+            if not restCleanupTried then ClearCatTracking() end
+            return
+        end
         local s = Scan()
         local e, why = Situation(s)
         if e then
             if not override or override.key ~= e.key then
-                override = { key = e.key, name = e.name, why = why, before = override and override.before or s.active }
+                override = { key = e.key, name = e.name, why = why }
                 Log("situation: " .. why .. ", using " .. e.name)
                 if UpdateBar then UpdateBar() end
             end
@@ -719,17 +782,14 @@ do
             if InCombatLockdown() or UnitAffectingCombat("player") or UnitIsDeadOrGhost("player") or UnitOnTaxi("player") then return end
             if Busy() or OnCooldown(e.key) or (failing[e.key] or 0) > GetTime() then return end
             if attempt and not attempt.done then return end
-            Cast(e, "situation")
-            ownedKey = e.key
+            Cast(e, "situation", why)
         elseif override then
-            local before = override.before
             Log("situation over (" .. override.why .. ")")
-            override = nil
-            if db.enabled then
-                lastSwitch = 0 -- the rotation picks up at once
-            elseif before and before ~= s.active and s.byKey[before] then
-                Cast(s.byKey[before], "situation")
+            if override.why == "Cat Form" and not InCatForm() then
+                mineralsResumeAt = GetTime() + 2
             end
+            override = nil
+            lastSwitch = 0 -- normal rotation delay does not apply to the handoff
             if UpdateBar then UpdateBar() end
         end
     end
@@ -737,6 +797,17 @@ end
 
 local function OnTrackingChanged()
     local s = Scan()
+    if humanoidsMute then
+        local now = GetTime()
+        local active = s.on[DRUID_TRACK_HUMANOIDS]
+        if now >= humanoidsMute.deadline or (humanoidsMute.applied and not active) then
+            UnmuteHumanoids()
+        elseif active and not humanoidsMute.applied then
+            -- Leave a short grace period for audio queued with the tracking update.
+            humanoidsMute.applied = true
+            humanoidsMute.deadline = math.min(humanoidsMute.deadline, now + 0.15)
+        end
+    end
     if lateCheck and not lateCheck.landed and s.on[lateCheck.target] then
         Landed(lateCheck, s, true)
         lateCheck = nil
@@ -751,8 +822,8 @@ local function OnTrackingChanged()
     end
     local active = s.active
     if mutedAt and attempt and s.on[attempt.target] then C_Timer.After(0.3, Unmute) end
+    if ownedKey and not s.on[ownedKey] then ownedKey, ownedSituation = nil, nil end
     if active ~= lastActive then
-        if active ~= ownedKey then ownedKey = nil end
         RememberTracker(active)
         if active then lastSwitch = GetTime() end
         lastActive = active
@@ -3248,7 +3319,10 @@ local function BuildContent()
     OptionCheck(c, "Pause in dungeons, raids and battlegrounds", "pauseInstances", LEFT, -158)
     OptionCheck(c, "Wait while the loot window is open", "pauseLooting", LEFT, -184)
     OptionCheck(c, "Quiet switches (mutes sound effects briefly)", "quiet", LEFT, -210, function()
-        if not db.quiet then Unmute() end
+        if not db.quiet then
+            Unmute()
+            UnmuteHumanoids()
+        end
     end)
     KeyOnlyCheck(c, LEFT, -236)
     OptionCheck(c, "Leave ability keys alone (key press mode)", "skipAbilityKeys", LEFT, -276)
@@ -3965,6 +4039,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         if RefreshOptions then RefreshOptions() end
     elseif event == "PLAYER_LOGOUT" then
         Unmute()
+        UnmuteHumanoids()
         -- They point at the current track's tables; saved, they would be
         -- written out a second time.
         db.rotation, db.skipped = nil, nil
