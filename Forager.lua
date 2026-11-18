@@ -3597,11 +3597,27 @@ end
 -- pauses / resumes, drag to move
 ---------------------------------------------------------------------------
 
-do
+-- Keep the minimap helpers within their own function's local-variable limit.
+(function()
     local mmButton, mmIcon
+    local iconLibrary, brokerIcon
+
+    local function MinimapClick(_, button)
+        if button == "RightButton" then Toggle()
+        elseif button == "LeftButton" then ToggleOptions() end
+    end
+
+    local function MinimapTooltip(tip)
+        tip:SetText("Forager " .. (db.enabled and "|cff40ff40running|r" or "|cffff4040paused|r"), 1, 1, 1)
+        tip:AddLine(StatusText(), 0.85, 0.85, 0.85)
+        tip:AddLine(" ")
+        tip:AddLine("Left-click: options", 0.7, 0.7, 0.7)
+        tip:AddLine("Right-click: pause / resume", 0.7, 0.7, 0.7)
+        tip:AddLine("Drag: move around the minimap", 0.7, 0.7, 0.7)
+    end
 
     local function PlaceMinimapButton()
-        local angle = math.rad(db.minimapAngle or 225)
+        local angle = math.rad(db.minimapIcon.minimapPos or 225)
         local radius = (Minimap:GetWidth() or 140) / 2 + 6
         -- Only while it sits on the minimap. A button collector (EllesmereUI's, for one) that
         -- has taken the button keeps it where it put it.
@@ -3622,8 +3638,41 @@ do
 
     UpdateMinimapButton = function()
         if not Minimap then return end
+        if not (mmButton or brokerIcon or db.minimap) then return end
+        local s = Scan()
+        local on = s.active and s.byKey[s.active]
+        local texture = db.minimapShowsTracker and on and on.texture or ICON
+
+        if not (mmButton or brokerIcon) then
+            db.minimapIcon = db.minimapIcon or { minimapPos = db.minimapAngle }
+            local broker = LibStub and LibStub("LibDataBroker-1.1", true)
+            iconLibrary = broker and LibStub("LibDBIcon-1.0", true)
+            if iconLibrary then
+                brokerIcon = broker:NewDataObject(ADDON, {
+                    type = "launcher",
+                    text = ADDON,
+                    icon = texture,
+                    OnClick = MinimapClick,
+                    OnTooltipShow = MinimapTooltip,
+                })
+                db.minimapIcon.hide = false
+                iconLibrary:Register(ADDON, brokerIcon, db.minimapIcon)
+            end
+        end
+        if brokerIcon then
+            if brokerIcon.icon ~= texture then brokerIcon.icon = texture end
+            local button = iconLibrary:GetMinimapButton(ADDON)
+            local hide = not db.minimap
+            if db.minimapIcon.hide ~= hide then
+                db.minimapIcon.hide = hide
+                -- Preserve the position assigned by a button collector.
+                if button then button:SetShown(not hide) end
+            end
+            if button and button.icon then button.icon:SetDesaturated(not db.enabled) end
+            return
+        end
+
         if not mmButton then
-            if not db.minimap then return end
             mmButton = CreateFrame("Button", "ForagerMinimapButton", Minimap)
             mmButton:SetSize(31, 31)
             mmButton:SetFrameStrata("MEDIUM")
@@ -3648,37 +3697,27 @@ do
             border:SetPoint("TOPLEFT")
             border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
 
-            mmButton:SetScript("OnClick", function(_, button)
-                if button == "RightButton" then Toggle() else ToggleOptions() end
-            end)
+            mmButton:SetScript("OnClick", MinimapClick)
             mmButton:SetScript("OnDragStart", function(self)
                 self:SetScript("OnUpdate", function()
                     local mx, my = Minimap:GetCenter()
                     local scale = Minimap:GetEffectiveScale()
                     local cx, cy = GetCursorPosition()
                     if not (mx and my and cx and cy) then return end
-                    db.minimapAngle = math.deg(math.atan2(cy / scale - my, cx / scale - mx)) % 360
+                    db.minimapIcon.minimapPos = math.deg(math.atan2(cy / scale - my, cx / scale - mx)) % 360
                     PlaceMinimapButton()
                 end)
             end)
             mmButton:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
             mmButton:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-                GameTooltip:SetText("Forager " .. (db.enabled and "|cff40ff40running|r" or "|cffff4040paused|r"), 1, 1, 1)
-                GameTooltip:AddLine(StatusText(), 0.85, 0.85, 0.85)
-                GameTooltip:AddLine(" ")
-                GameTooltip:AddLine("Left-click: options", 0.7, 0.7, 0.7)
-                GameTooltip:AddLine("Right-click: pause / resume", 0.7, 0.7, 0.7)
-                GameTooltip:AddLine("Drag: move around the minimap", 0.7, 0.7, 0.7)
+                MinimapTooltip(GameTooltip)
                 GameTooltip:Show()
             end)
             mmButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
         end
-        local s = Scan()
-        local on = s.active and s.byKey[s.active]
-        local texture = db.minimapShowsTracker and on and on.texture or ICON
         mmIcon:SetTexture(texture)
-        -- Leatrix Plus hides our button and copies its initial texture into a broker icon.
+        -- A collector may already have copied the fallback button.
         local broker = LibStub and LibStub("LibDataBroker-1.1", true)
         local copy = broker and broker:GetDataObjectByName("LeaPlusCustomIcon_ForagerMinimapButton")
         if copy and copy.icon ~= texture then copy.icon = texture end
@@ -3686,7 +3725,7 @@ do
         mmButton:SetShown(db.minimap and true or false)
         PlaceMinimapButton()
     end
-end
+end)()
 
 ---------------------------------------------------------------------------
 -- Key bindings (Bindings.xml) and slash commands

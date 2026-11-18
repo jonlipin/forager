@@ -1989,6 +1989,52 @@ run('the options window closes from its X, in combat too', OPEN + `
   check(not win.shown, "out of combat the X still closes it")
 `);
 
+run('LibDBIcon minimap button reports the current tracking and pause status', `
+  local data, saved, desaturated
+  local button = CreateFrame("Button", nil, Minimap)
+  button.icon = { SetDesaturated = function(_, value) desaturated = value end }
+  local libs = {
+    ["LibDataBroker-1.1"] = { NewDataObject = function(_, name, object)
+      check(name == "Forager", "Forager publishes its own broker object")
+      data = object
+      return object
+    end },
+    ["LibDBIcon-1.0"] = {
+      Register = function(_, name, object, options)
+        check(name == "Forager" and object == data and not saved, "a single standard icon is registered")
+        saved = options
+        button:SetShown(not saved.hide)
+      end,
+      GetMinimapButton = function() return button end,
+    },
+  }
+  LibStub = function(name) return libs[name] end
+  T.form = 1 T.advance(2)
+  SlashCmdList.FORAGER("minimap")
+  check(ForagerMinimapButton == nil and button.shown, "only the standard button is created")
+  check(saved.minimapPos == 73, "the standard button keeps the saved minimap angle")
+  local function Tooltip()
+    local tip = { SetText = function(self, text) self.title = text end,
+      AddLine = function(self, text) self.status = self.status or text end }
+    data.OnTooltipShow(tip)
+    return tip.title, tip.status
+  end
+  local title, status = Tooltip()
+  check(title:find("running", 1, true) and status:find("Track Humanoids", 1, true), "tooltip shows running and humanoids")
+  check(data.icon == T.tracking[6].texture, "broker icon shows humanoids")
+  T.form = nil T.advance(4.5)
+  title, status = Tooltip()
+  check(status:find("Tracking: |cffffffffFind Minerals", 1, true), "tooltip shows minerals after leaving Cat Form")
+  check(data.icon == T.tracking[2].texture, "broker icon shows minerals")
+  data.OnClick(button, "RightButton")
+  title, status = Tooltip()
+  check(title:find("paused", 1, true) and desaturated, "right click pauses and updates the button")
+  SlashCmdList.FORAGER("minimap")
+  check(saved.hide and not button.shown, "hiding Forager also hides it from the button collector")
+  SlashCmdList.FORAGER("minimap")
+  check(not saved.hide and button.shown, "show restores the registered button")
+`, { db: '{ minimap = false, minimapAngle = 73, rotation = { [2580] = true } }' });
+
 run('Leatrix Plus minimap copy follows the active tracking icon', `
   T.form = 1 T.advance(2)
   check(T.active() == "Track Humanoids", "humanoids before Leatrix copies the button")
