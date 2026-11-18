@@ -3676,7 +3676,12 @@ do
         end
         local s = Scan()
         local on = s.active and s.byKey[s.active]
-        mmIcon:SetTexture(db.minimapShowsTracker and on and on.texture or ICON)
+        local texture = db.minimapShowsTracker and on and on.texture or ICON
+        mmIcon:SetTexture(texture)
+        -- Leatrix Plus hides our button and copies its initial texture into a broker icon.
+        local broker = LibStub and LibStub("LibDataBroker-1.1", true)
+        local copy = broker and broker:GetDataObjectByName("LeaPlusCustomIcon_ForagerMinimapButton")
+        if copy and copy.icon ~= texture then copy.icon = texture end
         mmIcon:SetDesaturated(not db.enabled)
         mmButton:SetShown(db.minimap and true or false)
         PlaceMinimapButton()

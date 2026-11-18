@@ -1989,6 +1989,27 @@ run('the options window closes from its X, in combat too', OPEN + `
   check(not win.shown, "out of combat the X still closes it")
 `);
 
+run('Leatrix Plus minimap copy follows the active tracking icon', `
+  T.form = 1 T.advance(2)
+  check(T.active() == "Track Humanoids", "humanoids before Leatrix copies the button")
+  local _, originalIcon = ForagerMinimapButton:GetRegions()
+  local copy = { icon = originalIcon.texture }
+  check(copy.icon == T.tracking[6].texture, "Leatrix copies the humanoids icon once")
+  local broker = { GetDataObjectByName = function(_, name)
+    if name == "LeaPlusCustomIcon_ForagerMinimapButton" then return copy end
+  end }
+  LibStub = function(name, silent)
+    if name == "LibDataBroker-1.1" and silent then return broker end
+  end
+
+  T.form = nil T.advance(2.5)
+  check(T.active() == "Find Minerals", "minerals after the Cat Form delay")
+  check(originalIcon.texture == T.tracking[2].texture, "the original Forager icon shows minerals")
+  check(copy.icon == originalIcon.texture, "the Leatrix copy shows minerals too")
+  T.form = 1 T.advance(3)
+  check(copy.icon == T.tracking[6].texture, "the copy switches back in Cat Form")
+`, { db: '{ rotation = { [2580] = true } }' });
+
 run('minimap button: left where a collector puts it, dragged round the rim on the minimap', `
 -- A minimap button collector (EllesmereUI's, for one) takes the button off the minimap. Neither a
 -- refresh nor a drag tick may put it back on the rim then; on the minimap a drag still moves it.
